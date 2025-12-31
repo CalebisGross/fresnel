@@ -64,6 +64,7 @@ imgui.ini
 
 # Model weights (download separately)
 models/*.onnx
+!models/tiny_depth.onnx
 
 # Test artifacts
 *.ppm

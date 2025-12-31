@@ -88,6 +88,63 @@ Create an efficient, high-quality, open-source tool that converts single images 
 
 ---
 
+## Depth Estimation Training
+
+Fresnel includes a lightweight depth estimation training pipeline for learning and experimentation.
+
+### TinyDepthNet
+
+A minimal encoder-decoder architecture (~2.1M parameters) with U-Net style skip connections.
+
+| Variant | Parameters | Description |
+|---------|------------|-------------|
+| `tiny` | ~2.1M | Custom encoder-decoder |
+| `resnet18` | ~14M | Pretrained ResNet-18 backbone |
+
+**Training:**
+
+```bash
+# Quick test with synthetic data (no download needed)
+python scripts/train_tiny_depth.py --dataset synthetic --epochs 10
+
+# Train on NYU Depth V2 (downloads ~4GB)
+python scripts/train_tiny_depth.py --dataset nyu --epochs 50
+
+# Train on custom images with Depth Anything V2 pseudo-labels
+python scripts/train_tiny_depth.py --dataset folder --data_root ./my_images --epochs 50
+```
+
+**Testing:**
+
+```bash
+# Run inference on images
+python scripts/test_tiny_depth.py image.jpg
+
+# Multiple images
+python scripts/test_tiny_depth.py image1.jpg image2.png image3.jpg
+```
+
+### Depth Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `train_tiny_depth.py` | Train TinyDepthNet model |
+| `test_tiny_depth.py` | Run inference and save visualizations |
+| `tiny_depth_model.py` | Model architecture definitions |
+| `depth_dataset.py` | Dataset loaders (synthetic, NYU, folder) |
+| `depth_inference.py` | Depth Anything V2 inference |
+| `generate_pseudo_labels.py` | Generate depth labels using DA V2 |
+| `export_depth_model.py` | Export Depth Anything V2 to ONNX |
+
+### Pre-trained Models
+
+| Model | Size | Location |
+|-------|------|----------|
+| Depth Anything V2 (small) | ~100 MB | `models/depth_anything_v2_small.onnx` |
+| TinyDepthNet | ~13 MB | `models/tiny_depth.onnx` |
+
+---
+
 ## Project Structure
 
 ```
@@ -116,11 +173,11 @@ fresnel/
 ## Roadmap
 
 ### Phase 1: Foundation (MVP)
-- [ ] Set up Vulkan compute pipeline with Kompute
-- [ ] Implement basic Gaussian splatting renderer
-- [ ] Create minimal ImGui viewport
-- [ ] Load pre-trained depth model and run inference
-- [ ] Basic depth → point cloud → display
+- [x] Set up Vulkan compute pipeline with Kompute
+- [x] Implement basic Gaussian splatting renderer
+- [x] Create minimal ImGui viewport
+- [x] Load pre-trained depth model and run inference
+- [x] Basic depth → point cloud → display
 
 ### Phase 2: Core Pipeline
 - [ ] Implement feature encoder (DINOv2 via ONNX)
