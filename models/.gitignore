@@ -1,0 +1,3 @@
+# Model weights (download separately)
+*.onnx
+depth_processor/

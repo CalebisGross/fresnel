@@ -63,8 +63,36 @@ public:
 };
 
 /**
+ * DepthAnythingEstimator - Depth Anything V2 via Python/ONNX
+ *
+ * Uses the Depth Anything V2 model for accurate monocular depth estimation.
+ * Requires Python environment with onnxruntime and the exported model.
+ */
+class DepthAnythingEstimator : public DepthEstimator {
+public:
+    DepthAnythingEstimator();
+
+    DepthMap estimate(const Image& image) override;
+    std::string name() const override { return "Depth Anything V2"; }
+    bool is_ready() const override { return model_available_; }
+
+    /**
+     * Set custom paths for Python and script
+     */
+    void set_python_path(const std::string& path) { python_path_ = path; }
+    void set_script_path(const std::string& path) { script_path_ = path; }
+
+private:
+    std::string python_path_;
+    std::string script_path_;
+    bool model_available_ = false;
+
+    bool check_model_available();
+};
+
+/**
  * Create the best available depth estimator
- * Falls back to placeholders if no ML backend available
+ * Returns Depth Anything V2 if available, otherwise falls back to placeholder
  */
 std::unique_ptr<DepthEstimator> create_depth_estimator();
 

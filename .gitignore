@@ -58,3 +58,14 @@ tmp/
 temp/
 *.tmp
 imgui.ini
+
+# Python virtual environment
+.venv/
+
+# Model weights (download separately)
+models/*.onnx
+
+# Test artifacts
+*.ppm
+*.bin
+test_*.jpg

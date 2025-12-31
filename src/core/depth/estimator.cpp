@@ -1,8 +1,32 @@
 #include "estimator.hpp"
 #include <cmath>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
+#include <array>
+#include <cstdio>
+#include <sstream>
 
 namespace fresnel {
+
+// Helper to find project root (where .venv and scripts are)
+static std::string find_project_root() {
+    std::filesystem::path current = std::filesystem::current_path();
+
+    // Walk up looking for scripts/depth_inference.py
+    for (int i = 0; i < 10; i++) {
+        if (std::filesystem::exists(current / "scripts" / "depth_inference.py")) {
+            return current.string();
+        }
+        if (current.has_parent_path() && current != current.parent_path()) {
+            current = current.parent_path();
+        } else {
+            break;
+        }
+    }
+
+    return "";
+}
 
 // --- GradientDepthEstimator ---
 
@@ -119,11 +143,127 @@ DepthMap CenterDepthEstimator::estimate(const Image& image) {
     return depth;
 }
 
+// --- DepthAnythingEstimator ---
+
+DepthAnythingEstimator::DepthAnythingEstimator() {
+    std::string root = find_project_root();
+    if (!root.empty()) {
+        python_path_ = root + "/.venv/bin/python";
+        script_path_ = root + "/scripts/depth_inference.py";
+    }
+    model_available_ = check_model_available();
+}
+
+bool DepthAnythingEstimator::check_model_available() {
+    if (python_path_.empty() || script_path_.empty()) {
+        return false;
+    }
+
+    // Check if Python venv exists
+    if (!std::filesystem::exists(python_path_)) {
+        return false;
+    }
+
+    // Check if script exists
+    if (!std::filesystem::exists(script_path_)) {
+        return false;
+    }
+
+    // Check if model exists
+    std::string root = find_project_root();
+    std::string model_path = root + "/models/depth_anything_v2_small.onnx";
+    if (!std::filesystem::exists(model_path)) {
+        return false;
+    }
+
+    return true;
+}
+
+DepthMap DepthAnythingEstimator::estimate(const Image& image) {
+    if (image.empty() || !model_available_) {
+        return DepthMap();
+    }
+
+    uint32_t w = image.width();
+    uint32_t h = image.height();
+
+    // Create temp files for input/output
+    std::string temp_dir = std::filesystem::temp_directory_path().string();
+    std::string input_path = temp_dir + "/fresnel_depth_input.ppm";
+    std::string output_path = temp_dir + "/fresnel_depth_output.bin";
+
+    // Save input image as PPM (simple format)
+    {
+        std::ofstream file(input_path, std::ios::binary);
+        if (!file) return DepthMap();
+
+        file << "P6\n" << w << " " << h << "\n255\n";
+        for (uint32_t y = 0; y < h; y++) {
+            for (uint32_t x = 0; x < w; x++) {
+                float r, g, b;
+                image.get_rgb(x, y, r, g, b);
+                file.put(static_cast<char>(std::clamp(r * 255.0f, 0.0f, 255.0f)));
+                file.put(static_cast<char>(std::clamp(g * 255.0f, 0.0f, 255.0f)));
+                file.put(static_cast<char>(std::clamp(b * 255.0f, 0.0f, 255.0f)));
+            }
+        }
+    }
+
+    // Run Python inference script
+    std::string cmd = python_path_ + " " + script_path_ + " " +
+                      input_path + " " + output_path + " " +
+                      std::to_string(w) + " " + std::to_string(h) + " 2>&1";
+
+    std::array<char, 256> buffer;
+    std::string result;
+
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) {
+        return DepthMap();
+    }
+
+    while (fgets(buffer.data(), buffer.size(), pipe) != nullptr) {
+        result += buffer.data();
+    }
+
+    int ret = pclose(pipe);
+    if (ret != 0) {
+        // Python script failed, fall back to placeholder
+        return GradientDepthEstimator().estimate(image);
+    }
+
+    // Read output depth map
+    DepthMap depth(w, h);
+    {
+        std::ifstream file(output_path, std::ios::binary);
+        if (!file) {
+            return GradientDepthEstimator().estimate(image);
+        }
+
+        file.read(reinterpret_cast<char*>(depth.data()), w * h * sizeof(float));
+
+        if (file.gcount() != static_cast<std::streamsize>(w * h * sizeof(float))) {
+            return GradientDepthEstimator().estimate(image);
+        }
+    }
+
+    // Clean up temp files
+    std::filesystem::remove(input_path);
+    std::filesystem::remove(output_path);
+
+    return depth;
+}
+
 // --- Factory ---
 
 std::unique_ptr<DepthEstimator> create_depth_estimator() {
-    // TODO: Check for ONNX Runtime and Depth Anything V2 model
-    // For now, return the gradient-based placeholder
+    // Try Depth Anything V2 first
+    auto depth_anything = std::make_unique<DepthAnythingEstimator>();
+    if (depth_anything->is_ready()) {
+        return depth_anything;
+    }
+
+    // Fall back to gradient placeholder
     return std::make_unique<GradientDepthEstimator>();
 }
 
