@@ -4,6 +4,7 @@
 #include <string>
 #include <cstdint>
 #include <stdexcept>
+#include <glm/glm.hpp>
 
 namespace fresnel {
 
@@ -72,6 +73,23 @@ private:
 };
 
 /**
+ * SurfaceInfo - Surface properties computed from depth gradients
+ *
+ * Used by SAAG (Surface-Aligned Anisotropic Gaussians) to create
+ * properly oriented Gaussians that conform to surfaces.
+ *
+ * Also used by Silhouette Wrapping to detect edges and compute
+ * the direction surfaces curve away from camera.
+ */
+struct SurfaceInfo {
+    glm::vec3 normal;      // Surface normal (unit vector)
+    float variance;        // Local depth variance (edge indicator)
+    float gradient_mag;    // Gradient magnitude (discontinuity detector)
+    glm::vec2 gradient_dir; // Normalized gradient direction (points toward deeper)
+    float depth_delta;     // Depth difference across the gradient
+};
+
+/**
  * DepthMap - Single-channel depth image
  */
 class DepthMap {
@@ -91,6 +109,15 @@ public:
     float& at(uint32_t x, uint32_t y) { return data_[y * width_ + x]; }
     float at(uint32_t x, uint32_t y) const { return data_[y * width_ + x]; }
 
+    // Safe access with bounds checking (returns 0 for out-of-bounds)
+    float at_safe(int x, int y) const {
+        if (x < 0 || x >= static_cast<int>(width_) ||
+            y < 0 || y >= static_cast<int>(height_)) {
+            return 0.0f;
+        }
+        return data_[y * width_ + x];
+    }
+
     // Get min/max depth values
     void get_range(float& min_depth, float& max_depth) const;
 
@@ -102,6 +129,19 @@ public:
 
     // Save as grayscale PNG
     bool save(const std::string& path) const;
+
+    /**
+     * Compute surface information at a pixel using depth gradients
+     *
+     * Uses Sobel filter to compute depth gradients (dD/dx, dD/dy),
+     * then derives surface normal, local variance, and gradient magnitude.
+     *
+     * @param x Pixel x coordinate
+     * @param y Pixel y coordinate
+     * @param gradient_scale Scale factor for gradient -> normal conversion
+     * @return SurfaceInfo containing normal, variance, and gradient_mag
+     */
+    SurfaceInfo compute_surface_info(uint32_t x, uint32_t y, float gradient_scale = 1.0f) const;
 
 private:
     uint32_t width_ = 0;

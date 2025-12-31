@@ -69,3 +69,7 @@ models/*.onnx
 *.ppm
 *.bin
 test_*.jpg
+output*.png
+
+# Model data files
+models/*.onnx.data

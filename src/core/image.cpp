@@ -154,4 +154,74 @@ bool DepthMap::save(const std::string& /*path*/) const {
     return false;
 }
 
+SurfaceInfo DepthMap::compute_surface_info(uint32_t x, uint32_t y, float gradient_scale) const {
+    SurfaceInfo info;
+
+    // Sobel kernels for gradient computation
+    // Gx = [[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]
+    // Gy = [[-1, -2, -1], [0, 0, 0], [1, 2, 1]]
+
+    int ix = static_cast<int>(x);
+    int iy = static_cast<int>(y);
+
+    // Sample 3x3 neighborhood with safe boundary handling
+    float d00 = at_safe(ix - 1, iy - 1);
+    float d10 = at_safe(ix,     iy - 1);
+    float d20 = at_safe(ix + 1, iy - 1);
+    float d01 = at_safe(ix - 1, iy);
+    float d11 = at_safe(ix,     iy);      // Center pixel
+    float d21 = at_safe(ix + 1, iy);
+    float d02 = at_safe(ix - 1, iy + 1);
+    float d12 = at_safe(ix,     iy + 1);
+    float d22 = at_safe(ix + 1, iy + 1);
+
+    // Compute Sobel gradients
+    float gx = (-d00 + d20 - 2.0f * d01 + 2.0f * d21 - d02 + d22) / 8.0f;
+    float gy = (-d00 - 2.0f * d10 - d20 + d02 + 2.0f * d12 + d22) / 8.0f;
+
+    // Gradient magnitude (for edge detection)
+    info.gradient_mag = std::sqrt(gx * gx + gy * gy);
+
+    // Gradient direction (normalized, points toward deeper regions)
+    if (info.gradient_mag > 1e-6f) {
+        info.gradient_dir = glm::vec2(gx, gy) / info.gradient_mag;
+    } else {
+        info.gradient_dir = glm::vec2(0.0f, 0.0f);
+    }
+
+    // Depth delta: max depth difference in neighborhood
+    float min_d = std::min({d00, d10, d20, d01, d11, d21, d02, d12, d22});
+    float max_d = std::max({d00, d10, d20, d01, d11, d21, d02, d12, d22});
+    info.depth_delta = max_d - min_d;
+
+    // Compute surface normal from gradients
+    // The depth gradient tells us how the surface tilts
+    // Normal = normalize(-dD/dx * scale, -dD/dy * scale, 1)
+    // Negative because increasing depth = surface tilting away
+    glm::vec3 normal(-gx * gradient_scale, -gy * gradient_scale, 1.0f);
+    float len = glm::length(normal);
+    if (len > 1e-6f) {
+        info.normal = normal / len;
+    } else {
+        info.normal = glm::vec3(0.0f, 0.0f, 1.0f); // Default: facing camera
+    }
+
+    // Compute local variance (for edge/confidence detection)
+    // Variance of the 3x3 neighborhood
+    float mean = (d00 + d10 + d20 + d01 + d11 + d21 + d02 + d12 + d22) / 9.0f;
+    float var = 0.0f;
+    var += (d00 - mean) * (d00 - mean);
+    var += (d10 - mean) * (d10 - mean);
+    var += (d20 - mean) * (d20 - mean);
+    var += (d01 - mean) * (d01 - mean);
+    var += (d11 - mean) * (d11 - mean);
+    var += (d21 - mean) * (d21 - mean);
+    var += (d02 - mean) * (d02 - mean);
+    var += (d12 - mean) * (d12 - mean);
+    var += (d22 - mean) * (d22 - mean);
+    info.variance = var / 9.0f;
+
+    return info;
+}
+
 } // namespace fresnel
