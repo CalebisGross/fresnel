@@ -36,6 +36,7 @@ FetchContent_MakeAvailable(glm)
 add_library(fresnel_core STATIC
     src/core/vulkan/context.cpp
     src/core/compute/pipeline.cpp
+    src/core/renderer/renderer.cpp
 )
 
 target_include_directories(fresnel_core PUBLIC
@@ -53,8 +54,11 @@ target_link_libraries(fresnel_core PUBLIC
 add_executable(fresnel src/main.cpp)
 target_link_libraries(fresnel PRIVATE fresnel_core)
 
-# Test executable - verify Vulkan + Kompute works
+# Test executables
 if(FRESNEL_BUILD_TESTS)
     add_executable(test_vulkan_compute tests/test_vulkan_compute.cpp)
     target_link_libraries(test_vulkan_compute PRIVATE fresnel_core)
+
+    add_executable(test_gaussian_renderer tests/test_gaussian_renderer.cpp)
+    target_link_libraries(test_gaussian_renderer PRIVATE fresnel_core)
 endif()
