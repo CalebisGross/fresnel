@@ -182,7 +182,7 @@ fresnel/
 - [x] Surface-aligned anisotropic Gaussians (SAAG)
 
 ### Phase 2: Core Pipeline
-- [ ] Implement feature encoder (DINOv2 via ONNX)
+- [x] Implement feature encoder (DINOv2 via ONNX)
 - [ ] Design learned Gaussian decoder architecture
 - [ ] Create training data pipeline (image + GT Gaussians)
 - [ ] Train decoder to predict Gaussians from features
