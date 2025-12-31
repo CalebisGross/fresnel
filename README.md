@@ -172,39 +172,39 @@ fresnel/
 
 ## Roadmap
 
-### Phase 1: Foundation (MVP)
+### Phase 1: Foundation (MVP) ✅
 - [x] Set up Vulkan compute pipeline with Kompute
 - [x] Implement basic Gaussian splatting renderer
 - [x] Create minimal ImGui viewport
 - [x] Load pre-trained depth model and run inference
 - [x] Basic depth → point cloud → display
+- [x] Normal estimation from depth gradients
+- [x] Surface-aligned anisotropic Gaussians (SAAG)
 
 ### Phase 2: Core Pipeline
 - [ ] Implement feature encoder (DINOv2 via ONNX)
-- [ ] Add normal estimation
-- [ ] Design and implement Gaussian decoder architecture
-- [ ] Connect pipeline end-to-end
-- [ ] Real-time preview during decode
+- [ ] Design learned Gaussian decoder architecture
+- [ ] Create training data pipeline (image + GT Gaussians)
+- [ ] Train decoder to predict Gaussians from features
+- [ ] Integrate learned decoder with viewer
 
-### Phase 3: Training Custom Decoder
-- [ ] Set up training pipeline (PyTorch + ROCm)
-- [ ] Curate/generate training data
-- [ ] Train Gaussian decoder from scratch
+### Phase 3: Quality & Optimization
+- [ ] Multi-view consistency losses
 - [ ] Optimize for 16GB VRAM constraint
-- [ ] Quantization and optimization
+- [ ] Quantization and model optimization
+- [ ] Benchmark against TripoSR/InstantMesh
 
 ### Phase 4: Export & Polish
 - [ ] Implement mesh extraction from Gaussians
-- [ ] Support multiple export formats (.obj, .gltf, .ply)
-- [ ] Texture baking
+- [ ] Support export formats (.obj, .gltf, .ply)
+- [ ] Texture baking from Gaussians
 - [ ] UI polish and user experience
-- [ ] Documentation and release
 
 ### Phase 5: Innovation
 - [ ] Explore novel decoder architectures
 - [ ] Multi-image support
 - [ ] Scene-level reconstruction
-- [ ] Community feedback integration
+- [ ] Progressive decode (coarse→fine)
 
 ---
 
