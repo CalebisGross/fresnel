@@ -1,0 +1,59 @@
+# Build outputs
+build/
+target/
+bin/
+lib/
+*.o
+*.a
+*.so
+*.dylib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+venv/
+.venv/
+env/
+
+# Rust
+Cargo.lock
+debug/
+*.rlib
+
+# Model weights (large files)
+weights/*.bin
+weights/*.onnx
+weights/*.pt
+weights/*.pth
+weights/*.safetensors
+!weights/.gitkeep
+
+# Assets (optional large files)
+assets/*.png
+assets/*.jpg
+assets/*.jpeg
+!assets/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Temporary
+tmp/
+temp/
+*.tmp
