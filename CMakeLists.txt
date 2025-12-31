@@ -78,6 +78,7 @@ add_library(fresnel_core STATIC
     src/core/renderer/renderer.cpp
     src/core/image.cpp
     src/core/depth/estimator.cpp
+    src/core/pointcloud.cpp
 )
 
 target_include_directories(fresnel_core PUBLIC
@@ -106,6 +107,9 @@ if(FRESNEL_BUILD_TESTS)
 
     add_executable(test_depth_estimator tests/test_depth_estimator.cpp)
     target_link_libraries(test_depth_estimator PRIVATE fresnel_core)
+
+    add_executable(test_pointcloud tests/test_pointcloud.cpp)
+    target_link_libraries(test_pointcloud PRIVATE fresnel_core)
 endif()
 
 # Viewer application with ImGui
