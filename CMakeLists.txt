@@ -76,10 +76,13 @@ add_library(fresnel_core STATIC
     src/core/vulkan/context.cpp
     src/core/compute/pipeline.cpp
     src/core/renderer/renderer.cpp
+    src/core/image.cpp
+    src/core/depth/estimator.cpp
 )
 
 target_include_directories(fresnel_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party
     ${Vulkan_INCLUDE_DIRS}
 )
 
@@ -100,6 +103,9 @@ if(FRESNEL_BUILD_TESTS)
 
     add_executable(test_gaussian_renderer tests/test_gaussian_renderer.cpp)
     target_link_libraries(test_gaussian_renderer PRIVATE fresnel_core)
+
+    add_executable(test_depth_estimator tests/test_depth_estimator.cpp)
+    target_link_libraries(test_depth_estimator PRIVATE fresnel_core)
 endif()
 
 # Viewer application with ImGui
