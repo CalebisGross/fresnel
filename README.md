@@ -24,13 +24,70 @@ The goal is not to replicate TripoSR or InstantMesh - it's to discover what's po
 
 ---
 
+## Why "Fresnel"?
+
+This project is named after **Augustin-Jean Fresnel (1788-1827)**, the French physicist who revolutionized our understanding of light through wave optics. His work provides deep conceptual connections to our approach—and more than just a name, his principles directly inform our algorithms.
+
+### The Physics Behind the Name
+
+Fresnel's genius was proving that **complex optical phenomena emerge from simple wave principles**. He reduced complicated lens design to elegant mathematics, showing that light could be understood and manipulated through interference and diffraction.
+
+Our project embodies the same spirit: **complex 3D scenes emerge from simple Gaussian primitives**, guided by learned principles rather than explicit geometry.
+
+### Wave Optics → Gaussian Splatting
+
+| Fresnel Concept | Our Implementation | Connection |
+|-----------------|-------------------|------------|
+| **Huygens-Fresnel Principle** | Gaussian superposition | Every point emits wavelets that combine → Every Gaussian contributes color that blends |
+| **Fresnel Zones** | Discrete depth layers | Concentric zones that organize wave contributions → Depth shells that organize Gaussians |
+| **Fresnel Diffraction** | Edge-aware placement | Bright fringes at boundaries → More Gaussians at depth discontinuities |
+| **Fresnel Lens** | Efficient representation | Complex optics via thin rings → Complex 3D via sparse Gaussians |
+| **Wave Interference** | Phase-modulated blending | Constructive/destructive patterns → Smooth alpha compositing |
+
+### The Core Insight
+
+Just as a **Fresnel lens** achieves the same optical function as a thick convex lens with far less material (by collapsing the lens into concentric rings), **Gaussian splatting** represents complex 3D scenes with far fewer primitives than traditional mesh-based methods.
+
+Fresnel discovered that you don't need the full bulk of a lens—just the key refractive surfaces arranged efficiently. Similarly, we don't need dense voxels or millions of triangles—just strategically placed Gaussians that capture the essential visual information.
+
+### Fresnel-Inspired Features
+
+Our implementation includes physics-inspired enhancements:
+
+- **Fresnel Depth Zones**: Organize Gaussians into discrete depth layers (like Fresnel zone plates) for better handling of depth discontinuities
+- **Boundary Emphasis**: Weight loss higher at depth edges, mimicking how diffraction creates bright fringes at boundaries
+- **Edge-Aware Placement**: Detect depth discontinuities and place smaller, denser Gaussians there (like diffraction patterns concentrate light at edges)
+- **Phase Blending**: Interference-like modulation for smoother Gaussian transitions
+
+```bash
+# Train with Fresnel-inspired enhancements
+python scripts/train_gaussian_decoder.py \
+    --data_dir images/training \
+    --use_fresnel_zones \
+    --num_fresnel_zones 8 \
+    --use_edge_aware \
+    --boundary_weight 0.1
+```
+
+| Training Flag | Description |
+|---------------|-------------|
+| `--use_fresnel_zones` | Enable discrete depth zone organization |
+| `--num_fresnel_zones` | Number of depth zones (default: 8) |
+| `--boundary_weight` | Extra loss weight at zone boundaries (default: 0.1) |
+| `--use_edge_aware` | Enable edge-aware Gaussian placement |
+| `--use_phase_blending` | Enable interference-like alpha blending |
+| `--edge_scale_factor` | Scale reduction at edges (default: 0.5) |
+| `--edge_opacity_boost` | Opacity increase at edges (default: 0.2) |
+
+---
+
 ## Mission
 
 Create an efficient, high-quality, open-source tool that converts single images into 3D models, optimized for consumer AMD GPUs. Democratize 3D reconstruction for users without expensive datacenter hardware.
 
 ---
 
-## Target Hardware
+## Testing Hardware
 
 | Component | Spec |
 |-----------|------|
@@ -145,6 +202,165 @@ python scripts/test_tiny_depth.py image1.jpg image2.png image3.jpg
 
 ---
 
+## Gaussian Decoder Training
+
+Fresnel includes a learned Gaussian decoder that predicts 3D Gaussians directly from DINOv2 features.
+
+### DirectPatchDecoder
+
+The decoder predicts Gaussians for each DINOv2 patch (37x37 grid), trained with differentiable rendering.
+
+| Component | Specification |
+|-----------|---------------|
+| Input | DINOv2 features (37x37x384) + Depth map |
+| Output | 5,476 Gaussians (37x37x4 per patch) |
+| Architecture | MLP [512, 256, 128] per patch |
+| Parameters | ~400K |
+| Losses | L1 RGB + SSIM (0.5) + LPIPS (0.1) |
+
+**Training:**
+
+```bash
+# Download training data from HuggingFace (500 face images)
+python scripts/download_training_data.py --dataset lpff --count 500
+
+# Train the decoder (overnight, ~8-12 hours)
+./scripts/train_overnight.sh
+
+# Or run manually with custom settings
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
+    --experiment 2 \
+    --data_dir images/training \
+    --epochs 1000 \
+    --gaussians_per_patch 4
+```
+
+**Using in the Viewer:**
+
+The trained ONNX model is automatically loaded by the viewer. Toggle "Use Learned Decoder" in the Quality Settings panel.
+
+### Decoder Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `train_gaussian_decoder.py` | Train Gaussian decoder models |
+| `gaussian_decoder_models.py` | Model architecture definitions |
+| `differentiable_renderer.py` | PyTorch differentiable Gaussian renderer (includes TileBasedRenderer) |
+| `fresnel_zones.py` | Fresnel-inspired depth zones and edge detection utilities |
+| `preprocess_training_data.py` | Extract DINOv2 features, depth maps, optional background removal |
+| `download_training_data.py` | Download datasets from HuggingFace |
+| `decoder_inference.py` | ONNX inference for C++ integration |
+| `train_overnight.sh` | Automated overnight training script |
+| `vlm_guidance.py` | VLM semantic guidance via LM Studio (experimental) |
+
+### Available Datasets
+
+| Dataset | Images | Source |
+|---------|--------|--------|
+| LPFF | 19,590 | `onethousand/LPFF` (large-pose faces) |
+| FFHQ | 70,000 | `student/FFHQ` (high-quality faces) |
+| CelebA | 202,599 | `randall-lab/celeb-a` (celebrity faces) |
+
+### Data Preprocessing
+
+```bash
+# Extract DINOv2 features and depth maps
+python scripts/preprocess_training_data.py --data_dir images/training
+
+# With background removal (recommended for cleaner training)
+python scripts/preprocess_training_data.py --data_dir images/training --remove_background
+
+# With VLM density maps for semantic-aware training (requires LM Studio)
+python scripts/preprocess_training_data.py --data_dir images/training --use_vlm
+
+# Full pipeline: background removal + VLM guidance
+python scripts/preprocess_training_data.py --data_dir images/training --remove_background --use_vlm
+```
+
+### Training with VLM Guidance
+
+VLM semantic guidance focuses training on important regions (faces, eyes, fine details) by weighting the loss function.
+
+```bash
+# Train with VLM-weighted loss (requires precomputed VLM density maps)
+python scripts/train_gaussian_decoder.py \
+    --data_dir images/training \
+    --use_vlm_guidance \
+    --vlm_weight 0.5
+
+# Adjust VLM weight (0=uniform, 1=full VLM weighting)
+python scripts/train_gaussian_decoder.py \
+    --data_dir images/training \
+    --use_vlm_guidance \
+    --vlm_weight 0.3
+```
+
+| Training Flag         | Description                                                       |
+|-----------------------|-------------------------------------------------------------------|
+| `--use_vlm_guidance`  | Enable VLM-weighted loss during training                          |
+| `--vlm_weight`        | Blend between uniform (0) and VLM-weighted (1) loss (default: 0.5)|
+
+---
+
+## Memory-Efficient Renderer
+
+The `TileBasedRenderer` in `differentiable_renderer.py` enables training at higher resolutions by only evaluating Gaussians within their effective radius (3σ culling).
+
+| Renderer | Memory (5K Gaussians @ 256×256) |
+|----------|--------------------------------|
+| Original | ~3 GB (O(N × H × W)) |
+| TileBasedRenderer | ~100 MB (O(N × r²)) |
+
+This 50x memory reduction enables training with 10K+ Gaussians at 256×256 on 16GB VRAM.
+
+---
+
+## VLM Semantic Guidance (Experimental)
+
+Fresnel includes experimental VLM (Vision Language Model) guidance for semantic-aware training via LM Studio.
+
+### Features
+
+- **Density guidance**: VLM identifies regions needing more Gaussians (faces, eyes, fine details)
+- **Face-specific prompts**: Auto-detects faces and uses landmark-based density maps
+- **Depth hints**: Relative depth ordering from VLM understanding
+- **Segmentation hints**: Semantic regions with importance levels
+- **Background removal**: Process images same as training for consistency
+
+### Usage
+
+```bash
+# Basic density guidance
+python scripts/vlm_guidance.py image.png
+
+# With visualization output
+python scripts/vlm_guidance.py image.png --visualize --output vlm_output/
+
+# Smart mode (auto-detects faces, uses finer grid)
+python scripts/vlm_guidance.py image.png --smart --grid_size 8 -v
+
+# With background removal (matches training preprocessing)
+python scripts/vlm_guidance.py image.png --remove_background --smart -v
+```
+
+### Requirements
+
+- LM Studio running locally with a VLM model (Qwen2-VL, Qwen3-VL recommended)
+- Default API endpoint: `http://localhost:1234/v1/chat/completions`
+
+### CLI Options
+
+| Option | Description |
+|--------|-------------|
+| `--visualize, -v` | Generate and save visualizations |
+| `--output, -o` | Output directory (default: vlm_output) |
+| `--grid_size, -g` | Density grid size: 4, 8, or 16 (default: 8) |
+| `--smart, -s` | Auto-detect image type and use appropriate method |
+| `--remove_background, -r` | Remove background before VLM analysis |
+| `--url` | LM Studio API URL |
+
+---
+
 ## Project Structure
 
 ```
@@ -181,16 +397,20 @@ fresnel/
 - [x] Normal estimation from depth gradients
 - [x] Surface-aligned anisotropic Gaussians (SAAG)
 
-### Phase 2: Core Pipeline
+### Phase 2: Core Pipeline ✅
+
 - [x] Implement feature encoder (DINOv2 via ONNX)
-- [ ] Design learned Gaussian decoder architecture
-- [ ] Create training data pipeline (image + GT Gaussians)
-- [ ] Train decoder to predict Gaussians from features
-- [ ] Integrate learned decoder with viewer
+- [x] Design learned Gaussian decoder architecture (DirectPatchDecoder)
+- [x] Create training data pipeline (HuggingFace datasets + differentiable renderer)
+- [x] Train decoder to predict Gaussians from features
+- [x] Integrate learned decoder with viewer
+- [x] Add perceptual losses (SSIM + LPIPS)
 
 ### Phase 3: Quality & Optimization
 - [ ] Multi-view consistency losses
-- [ ] Optimize for 16GB VRAM constraint
+- [x] Optimize for 16GB VRAM constraint (TileBasedRenderer)
+- [x] Background removal preprocessing (rembg/u2net)
+- [x] VLM semantic guidance (experimental)
 - [ ] Quantization and model optimization
 - [ ] Benchmark against TripoSR/InstantMesh
 
@@ -210,13 +430,27 @@ fresnel/
 
 ## Experimental Ideas
 
-Things we might explore:
+Things we're exploring or might explore:
+
+### Implemented
+
+- **VLM-guided Gaussian placement** ✅ - Use local VLMs to identify important regions (faces, eyes, details) and weight loss or Gaussian density accordingly
+- **Fresnel depth zones** ✅ - Quantize depth into discrete zones (like Fresnel zone plates) for hierarchical organization and better depth discontinuity handling
+- **Fresnel diffraction edges** ✅ - Increase Gaussian density at depth discontinuities, mimicking how diffraction creates bright fringes at boundaries
+- **Wave interference blending** ✅ - Phase-modulated alpha compositing for smoother Gaussian transitions, inspired by wave interference patterns
+
+### In Progress
 
 - **Sparse attention on depth discontinuities** - Focus compute where geometry changes
-- **Frequency-domain reconstruction** - Work in Fourier space instead of spatial
 - **Hierarchical Gaussians** - Multi-scale representation for efficiency
+
+### Future
+
+- **Frequency-domain reconstruction** - Work in Fourier space instead of spatial
 - **Progressive decode** - Show coarse result in <100ms, refine over time
 - **Zero-shot from image encoder only** - Predict Gaussians directly from CLIP/DINOv2 features
+- **Fresnel zone plate rendering** - Use zone plate patterns for depth-aware importance sampling
+- **Adaptive zone boundaries** - Learn optimal depth zone boundaries per-scene rather than uniform spacing
 
 ---
 
