@@ -75,10 +75,12 @@ target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
 add_library(fresnel_core STATIC
     src/core/vulkan/context.cpp
     src/core/compute/pipeline.cpp
+    src/core/compute/radix_sort.cpp
     src/core/renderer/renderer.cpp
     src/core/image.cpp
     src/core/depth/estimator.cpp
     src/core/features/feature_extractor.cpp
+    src/core/decoder/gaussian_decoder.cpp
     src/core/pointcloud.cpp
 )
 

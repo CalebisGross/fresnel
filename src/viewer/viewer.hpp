@@ -6,6 +6,8 @@
 #include "core/renderer/gaussian.hpp"
 #include "core/image.hpp"
 #include "core/depth/estimator.hpp"
+#include "core/features/feature_extractor.hpp"
+#include "core/decoder/gaussian_decoder.hpp"
 #include "core/pointcloud.hpp"
 
 #include <GLFW/glfw3.h>
@@ -167,6 +169,9 @@ private:
         float density_threshold = 0.08f;  // Gradient threshold for extra Gaussians
         int density_extra = 4;            // Extra Gaussians per edge point
         float density_jitter = 0.6f;      // Position randomness
+
+        // Learned Decoder settings (replaces SAAG with ML model)
+        bool use_learned_decoder = true; // Use learned Gaussian decoder when available
     } quality_;
 
     // Performance state
@@ -178,9 +183,18 @@ private:
     // Depth estimator
     std::unique_ptr<DepthEstimator> depth_estimator_;
 
+    // Feature extractor for learned decoder
+    std::unique_ptr<FeatureExtractor> feature_extractor_;
+
+    // Learned Gaussian decoder
+    std::unique_ptr<GaussianDecoder> gaussian_decoder_;
+
     // Stored image/depth for re-processing with different settings
     Image loaded_image_;
     DepthMap loaded_depth_;
+
+    // Stored features for learned decoder
+    FeatureMap loaded_features_;
 
     // Image path input buffer for UI
     char image_path_buffer_[512] = "";

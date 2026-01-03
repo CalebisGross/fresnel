@@ -3,6 +3,8 @@
 #include <chrono>
 #include <cmath>
 #include <random>
+#include <fstream>
+#include <iostream>
 
 namespace fresnel {
 
@@ -290,6 +292,17 @@ void GaussianRenderer::init(const RenderSettings& settings) {
     settings_ = settings;
     compile_shaders();
     create_buffers();
+
+    // Initialize GPU radix sort
+    try {
+        gpu_sort_ = std::make_unique<GPURadixSort>(ctx_);
+        gpu_sort_->init(GPU_SORT_MAX_ELEMENTS);
+    } catch (const std::exception& e) {
+        std::cerr << "Warning: GPU radix sort initialization failed: " << e.what()
+                  << "\nFalling back to CPU sorting.\n";
+        gpu_sort_.reset();
+    }
+
     initialized_ = true;
 }
 
@@ -395,6 +408,21 @@ void GaussianRenderer::project_gaussians(const Camera& camera) {
 }
 
 void GaussianRenderer::sort_gaussians() {
+    // Use GPU radix sort for large Gaussian counts (eliminates CPU-GPU roundtrip)
+    if (gpu_sort_ && num_gaussians_ >= GPU_SORT_THRESHOLD && num_gaussians_ <= GPU_SORT_MAX_ELEMENTS) {
+        try {
+            sort_indices_ = gpu_sort_->sort(gaussians_2d_, num_gaussians_);
+            return;
+        } catch (const std::exception& e) {
+            std::cerr << "GPU sort failed: " << e.what() << ", using CPU fallback\n";
+        }
+    }
+
+    // Fall back to CPU sorting for small counts or if GPU sort unavailable/failed
+    cpu_sort_fallback();
+}
+
+void GaussianRenderer::cpu_sort_fallback() {
     // Download 2D Gaussians to get depths
     pipeline_.sync_to_host({gaussians_2d_});
     auto g2d_data = gaussians_2d_->vector();
@@ -517,6 +545,98 @@ GaussianCloud GaussianCloud::create_test_cloud(size_t count, float extent) {
     }
 
     return cloud;
+}
+
+bool GaussianCloud::save_binary(const std::string& path) const {
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+
+    // Write each Gaussian as 14 floats
+    // Format: position (3) + scale (3) + rotation (4) + color (3) + opacity (1)
+    for (const auto& g : gaussians_) {
+        // Position
+        file.write(reinterpret_cast<const char*>(&g.position.x), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.position.y), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.position.z), sizeof(float));
+
+        // Scale
+        file.write(reinterpret_cast<const char*>(&g.scale.x), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.scale.y), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.scale.z), sizeof(float));
+
+        // Rotation (quaternion w, x, y, z)
+        file.write(reinterpret_cast<const char*>(&g.rotation.w), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.rotation.x), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.rotation.y), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.rotation.z), sizeof(float));
+
+        // Color
+        file.write(reinterpret_cast<const char*>(&g.color.r), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.color.g), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.color.b), sizeof(float));
+
+        // Opacity
+        file.write(reinterpret_cast<const char*>(&g.opacity), sizeof(float));
+    }
+
+    return file.good();
+}
+
+bool GaussianCloud::load_binary(const std::string& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        return false;
+    }
+
+    // Get file size
+    auto size = file.tellg();
+    file.seekg(0, std::ios::beg);
+
+    // Calculate number of Gaussians (14 floats each)
+    size_t num_floats = static_cast<size_t>(size) / sizeof(float);
+    size_t num_gaussians = num_floats / 14;
+
+    if (num_gaussians == 0) {
+        return false;
+    }
+
+    gaussians_.clear();
+    gaussians_.reserve(num_gaussians);
+
+    // Read each Gaussian
+    for (size_t i = 0; i < num_gaussians; i++) {
+        Gaussian3D g;
+
+        // Position
+        file.read(reinterpret_cast<char*>(&g.position.x), sizeof(float));
+        file.read(reinterpret_cast<char*>(&g.position.y), sizeof(float));
+        file.read(reinterpret_cast<char*>(&g.position.z), sizeof(float));
+
+        // Scale
+        file.read(reinterpret_cast<char*>(&g.scale.x), sizeof(float));
+        file.read(reinterpret_cast<char*>(&g.scale.y), sizeof(float));
+        file.read(reinterpret_cast<char*>(&g.scale.z), sizeof(float));
+
+        // Rotation
+        file.read(reinterpret_cast<char*>(&g.rotation.w), sizeof(float));
+        file.read(reinterpret_cast<char*>(&g.rotation.x), sizeof(float));
+        file.read(reinterpret_cast<char*>(&g.rotation.y), sizeof(float));
+        file.read(reinterpret_cast<char*>(&g.rotation.z), sizeof(float));
+
+        // Color
+        file.read(reinterpret_cast<char*>(&g.color.r), sizeof(float));
+        file.read(reinterpret_cast<char*>(&g.color.g), sizeof(float));
+        file.read(reinterpret_cast<char*>(&g.color.b), sizeof(float));
+
+        // Opacity
+        file.read(reinterpret_cast<char*>(&g.opacity), sizeof(float));
+
+        gaussians_.push_back(g);
+    }
+
+    return file.good();
 }
 
 } // namespace fresnel

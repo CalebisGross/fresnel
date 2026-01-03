@@ -4,6 +4,7 @@
 #include <glm/gtc/quaternion.hpp>
 #include <vector>
 #include <cstdint>
+#include <string>
 
 namespace fresnel {
 
@@ -120,6 +121,29 @@ public:
      * Create a test cloud with random Gaussians
      */
     static GaussianCloud create_test_cloud(size_t count, float extent = 5.0f);
+
+    /**
+     * Save Gaussians to binary file for Python training.
+     *
+     * Format: N * 14 floats per Gaussian
+     *   - position: 3 floats (x, y, z)
+     *   - scale: 3 floats (sx, sy, sz)
+     *   - rotation: 4 floats (w, x, y, z) quaternion
+     *   - color: 3 floats (r, g, b)
+     *   - opacity: 1 float
+     *
+     * @param path Output file path
+     * @return true if successful
+     */
+    bool save_binary(const std::string& path) const;
+
+    /**
+     * Load Gaussians from binary file.
+     *
+     * @param path Input file path
+     * @return true if successful
+     */
+    bool load_binary(const std::string& path);
 
 private:
     std::vector<Gaussian3D> gaussians_;

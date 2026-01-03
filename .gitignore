@@ -38,12 +38,14 @@ weights/*.pt
 weights/*.pth
 weights/*.safetensors
 !weights/.gitkeep
+checkpoints/
 
 # Assets (optional large files)
 assets/*.png
 assets/*.jpg
 assets/*.jpeg
 !assets/.gitkeep
+images/
 
 # OS
 .DS_Store
@@ -74,3 +76,7 @@ output*.png
 
 # Model data files
 models/*.onnx.data
+vlm_output/
+vlm_viz/
+
+CLAUDE.md

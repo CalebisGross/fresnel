@@ -4,6 +4,7 @@
 #include "camera.hpp"
 #include "../vulkan/context.hpp"
 #include "../compute/pipeline.hpp"
+#include "../compute/radix_sort.hpp"
 #include <memory>
 #include <vector>
 
@@ -119,6 +120,13 @@ private:
     std::vector<float> pixels_;
     size_t num_gaussians_ = 0;
     bool initialized_ = false;
+
+    // GPU radix sort (replaces CPU sorting for large Gaussian counts)
+    std::unique_ptr<GPURadixSort> gpu_sort_;
+    static constexpr size_t GPU_SORT_THRESHOLD = 1000;  // Use GPU sort above this count
+    static constexpr size_t GPU_SORT_MAX_ELEMENTS = 200000;  // Max supported Gaussians
+
+    void cpu_sort_fallback();  // CPU sorting for small counts or fallback
 };
 
 } // namespace fresnel

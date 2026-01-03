@@ -106,6 +106,18 @@ bool Viewer::init(const Settings& settings) {
     depth_estimator_ = create_depth_estimator();
     stats_.depth_estimator_name = depth_estimator_->name();
 
+    // Initialize feature extractor (for learned decoder)
+    feature_extractor_ = create_feature_extractor();
+    if (feature_extractor_ && feature_extractor_->is_ready()) {
+        std::cout << "Feature extractor ready: " << feature_extractor_->name() << "\n";
+    }
+
+    // Initialize learned Gaussian decoder
+    gaussian_decoder_ = create_gaussian_decoder();
+    if (gaussian_decoder_ && gaussian_decoder_->is_ready()) {
+        std::cout << "Gaussian decoder ready: " << gaussian_decoder_->name() << "\n";
+    }
+
     running_ = true;
     return true;
 }
@@ -212,6 +224,16 @@ bool Viewer::load_image(const std::string& path) {
 
     std::cout << "Depth map size: " << loaded_depth_.width() << "x" << loaded_depth_.height() << "\n";
 
+    // Extract features if decoder is available
+    if (feature_extractor_ && feature_extractor_->is_ready()) {
+        std::cout << "Extracting DINOv2 features...\n";
+        loaded_features_ = feature_extractor_->extract(loaded_image_);
+        if (!loaded_features_.empty()) {
+            std::cout << "Features: " << loaded_features_.width() << "x"
+                      << loaded_features_.height() << "x" << loaded_features_.channels() << "\n";
+        }
+    }
+
     // Update stats
     stats_.loaded_image = path;
 
@@ -232,6 +254,32 @@ bool Viewer::load_image(const std::string& path) {
 void Viewer::reprocess_image(bool preview) {
     if (loaded_image_.empty() || loaded_depth_.empty()) {
         return;
+    }
+
+    // Use learned decoder if available and enabled
+    if (quality_.use_learned_decoder &&
+        gaussian_decoder_ && gaussian_decoder_->is_ready() &&
+        !loaded_features_.empty()) {
+
+        std::cout << "Using learned decoder: " << gaussian_decoder_->name() << "\n";
+
+        GaussianCloud gaussians = gaussian_decoder_->decode(loaded_features_, loaded_depth_);
+
+        if (!gaussians.empty()) {
+            // Center and normalize the cloud for proper display
+            // The decoder outputs Gaussians in a specific coordinate space,
+            // we may need to transform them to match our scene
+            // For now, use them directly
+
+            std::cout << "Learned decoder produced " << gaussians.size() << " Gaussians\n";
+
+            // Upload to renderer
+            load_gaussians(gaussians);
+            needs_rerender_ = true;
+            return;
+        } else {
+            std::cout << "Learned decoder failed, falling back to SAAG\n";
+        }
     }
 
     uint32_t w = loaded_depth_.width();
@@ -699,18 +747,45 @@ void Viewer::render_ui() {
                 }
             }
 
-            // SAAG settings
+            // Learned Decoder toggle
             ImGui::Separator();
-            ImGui::Text("Surface Alignment (SAAG):");
+            ImGui::Text("Gaussian Generation:");
 
-            if (ImGui::Checkbox("Enable SAAG", &quality_.use_saag)) {
+            bool decoder_available = gaussian_decoder_ && gaussian_decoder_->is_ready() && !loaded_features_.empty();
+
+            if (!decoder_available) {
+                ImGui::BeginDisabled();
+            }
+
+            if (ImGui::Checkbox("Use Learned Decoder", &quality_.use_learned_decoder)) {
                 reprocess_image(false);
             }
             if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Surface-Aligned Anisotropic Gaussians\nCreates flat disc-like Gaussians that\nconform to surfaces instead of spheres");
+                if (decoder_available) {
+                    ImGui::SetTooltip("Use trained ML model for Gaussian prediction\n(%s)", gaussian_decoder_->name().c_str());
+                } else {
+                    ImGui::SetTooltip("Learned decoder not available\nCheck: ONNX model + DINOv2 features");
+                }
             }
 
-            if (quality_.use_saag) {
+            if (!decoder_available) {
+                ImGui::EndDisabled();
+            }
+
+            // SAAG settings (only shown when not using learned decoder)
+            if (!quality_.use_learned_decoder) {
+                ImGui::Separator();
+                ImGui::Text("Surface Alignment (SAAG):");
+
+                if (ImGui::Checkbox("Enable SAAG", &quality_.use_saag)) {
+                    reprocess_image(false);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Surface-Aligned Anisotropic Gaussians\nCreates flat disc-like Gaussians that\nconform to surfaces instead of spheres");
+                }
+            }
+
+            if (quality_.use_saag && !quality_.use_learned_decoder) {
                 // SAAG-specific sliders
                 if (ImGui::SliderFloat("Flatness", &quality_.aspect_ratio, 1.0f, 15.0f, "%.1f")) {
                     slider_changed = true;
@@ -753,7 +828,10 @@ void Viewer::render_ui() {
                 }
             }
 
-            // Silhouette Wrapping - solves 2.5D problem
+            // Advanced SAAG settings only shown when not using learned decoder
+            if (!quality_.use_learned_decoder) {
+
+            // Silhouette Wrapping - solves 2.5D problem (only for SAAG)
             ImGui::Separator();
             ImGui::Text("Silhouette Wrapping:");
             if (ImGui::IsItemHovered()) {
@@ -914,6 +992,8 @@ void Viewer::render_ui() {
                 }
             }
 
+            } // End of !use_learned_decoder block
+
             // Handle preview/full quality switching (AFTER all sliders)
             if (slider_changed) {
                 if (slider_active) {
@@ -969,6 +1049,8 @@ void Viewer::render_ui() {
                 quality_.adaptive_density = true;
                 quality_.density_threshold = 0.08f;
                 quality_.density_extra = 4;
+                // Reset learned decoder setting
+                quality_.use_learned_decoder = false;
                 quality_.density_jitter = 0.6f;
                 reprocess_image(false);
             }
