@@ -397,6 +397,479 @@ class FresnelZones(nn.Module):
         )
 
 
+class PhysicsFresnelZones(nn.Module):
+    """
+    Physics-derived Fresnel zone computation based on optical path differences.
+
+    Unlike the heuristic FresnelZones class which uses uniform depth slicing,
+    this implementation uses the actual Fresnel zone plate formula:
+
+        r_n = √(n × λ × f)
+
+    where:
+        r_n = radius of nth zone boundary
+        λ = wavelength (learnable or fixed)
+        f = focal distance
+        n = zone number (1, 2, 3, ...)
+
+    Key physics insights:
+    1. Real Fresnel zones are NOT uniformly spaced - inner zones are wider
+    2. Each zone contributes with alternating phase (±π)
+    3. Phase is derived from optical path length: φ = (2π/λ) × path_length
+
+    Named after Augustin-Jean Fresnel (1788-1827).
+    """
+
+    def __init__(
+        self,
+        num_zones: int = 8,
+        wavelength: float = 0.05,      # Effective wavelength in depth units [0,1]
+        focal_depth: float = 0.5,       # Focal plane depth
+        learnable_wavelength: bool = True,
+        wavelength_min: float = 0.01,   # Minimum wavelength (prevents divergence)
+        wavelength_max: float = 0.5,    # Maximum wavelength
+    ):
+        """
+        Initialize PhysicsFresnelZones.
+
+        Args:
+            num_zones: Number of Fresnel zones
+            wavelength: Effective wavelength in normalized depth units [0, 1]
+            focal_depth: Depth of the focal plane (where path difference = 0)
+            learnable_wavelength: If True, wavelength is a learnable parameter
+            wavelength_min: Minimum allowed wavelength (risk mitigation)
+            wavelength_max: Maximum allowed wavelength (risk mitigation)
+        """
+        super().__init__()
+
+        self.num_zones = num_zones
+        self.focal_depth = focal_depth
+        self.wavelength_min = wavelength_min
+        self.wavelength_max = wavelength_max
+
+        # Learnable or fixed wavelength
+        if learnable_wavelength:
+            # Use raw parameter, constrain in forward pass
+            self._wavelength_raw = nn.Parameter(torch.tensor(wavelength))
+        else:
+            self.register_buffer('_wavelength_raw', torch.tensor(wavelength))
+
+        self.learnable_wavelength = learnable_wavelength
+
+    @property
+    def wavelength(self) -> torch.Tensor:
+        """Get wavelength with constraints applied."""
+        # Constrain to [wavelength_min, wavelength_max] to prevent divergence
+        return torch.clamp(
+            torch.abs(self._wavelength_raw),
+            self.wavelength_min,
+            self.wavelength_max
+        )
+
+    def compute_zone_boundaries(self, device: Optional[torch.device] = None) -> torch.Tensor:
+        """
+        Compute zone boundaries using Fresnel zone plate formula.
+
+        r_n = sqrt(n × λ × f)
+
+        Unlike uniform spacing, this produces wider inner zones and
+        narrower outer zones - the true physics of Fresnel zones.
+
+        Args:
+            device: Device for output tensor
+
+        Returns:
+            Tensor of shape (num_zones + 1,) with zone boundaries in [0, 1]
+        """
+        if device is None:
+            device = self._wavelength_raw.device
+
+        λ = self.wavelength
+        f = self.focal_depth
+
+        # Zone indices 0 to num_zones
+        n = torch.arange(self.num_zones + 1, device=device, dtype=torch.float32)
+
+        # Fresnel zone radii: r_n = sqrt(n × λ × f)
+        r_n = torch.sqrt(n * λ * f)
+
+        # Normalize to [0, 1] range
+        r_n = r_n / (r_n[-1] + 1e-8)
+
+        return r_n
+
+    def get_zone_index(self, depth: torch.Tensor) -> torch.Tensor:
+        """
+        Get zone index for each depth value.
+
+        Uses physics-based boundaries rather than uniform slicing.
+
+        Args:
+            depth: Tensor of depth values in [0, 1]
+
+        Returns:
+            Tensor of zone indices (0 to num_zones-1)
+        """
+        boundaries = self.compute_zone_boundaries(depth.device)
+
+        # bucketize assigns to bucket based on boundaries
+        zone_idx = torch.bucketize(depth, boundaries[1:-1])
+        zone_idx = torch.clamp(zone_idx, 0, self.num_zones - 1)
+
+        return zone_idx
+
+    def get_zone_phase(self, zone_idx: torch.Tensor) -> torch.Tensor:
+        """
+        Get phase for each zone (alternating pattern).
+
+        In Fresnel zone plates:
+        - Odd zones: phase = 0 (constructive contribution)
+        - Even zones: phase = π (destructive, but we use the sign flip)
+
+        This alternating pattern is KEY to Fresnel zone physics!
+
+        Args:
+            zone_idx: Tensor of zone indices
+
+        Returns:
+            Tensor of phase values (0 or π)
+        """
+        # Alternating: zone 0 -> 0, zone 1 -> π, zone 2 -> 0, ...
+        return (zone_idx % 2).float() * torch.pi
+
+    def compute_path_difference(self, depth: torch.Tensor) -> torch.Tensor:
+        """
+        Compute optical path difference from focal plane.
+
+        In wave optics, path difference determines phase:
+        Δpath = |depth - focal_depth|
+
+        Args:
+            depth: Tensor of depth values
+
+        Returns:
+            Tensor of path differences (always positive)
+        """
+        return torch.abs(depth - self.focal_depth)
+
+    def depth_to_phase(self, depth: torch.Tensor) -> torch.Tensor:
+        """
+        Convert depth to optical phase using wave equation.
+
+        φ = (2π / λ) × path_length
+
+        This is the REAL physics - phase directly from path length!
+
+        Args:
+            depth: Tensor of depth values
+
+        Returns:
+            Tensor of phase values in radians
+        """
+        λ = self.wavelength
+        path_diff = self.compute_path_difference(depth)
+
+        # Wave equation: φ = (2π / λ) × d
+        phase = (2 * torch.pi / λ) * path_diff
+
+        return phase
+
+    def forward(
+        self,
+        depth: torch.Tensor,
+        return_all: bool = False
+    ) -> Union[torch.Tensor, dict]:
+        """
+        Compute physics-based Fresnel zone information.
+
+        Args:
+            depth: Input depth tensor
+            return_all: If True, return dict with all computed values
+
+        Returns:
+            Phase values, or dict with zone_idx, phase, boundaries, etc.
+        """
+        phase = self.depth_to_phase(depth)
+
+        if not return_all:
+            return phase
+
+        zone_idx = self.get_zone_index(depth)
+
+        return {
+            'phase': phase,
+            'zone_idx': zone_idx,
+            'zone_phase': self.get_zone_phase(zone_idx),
+            'path_difference': self.compute_path_difference(depth),
+            'boundaries': self.compute_zone_boundaries(depth.device),
+            'wavelength': self.wavelength,
+        }
+
+    def extra_repr(self) -> str:
+        return (
+            f"num_zones={self.num_zones}, "
+            f"wavelength={self.wavelength.item():.4f}, "
+            f"focal_depth={self.focal_depth}, "
+            f"learnable={self.learnable_wavelength}"
+        )
+
+
+class FresnelDiffraction(nn.Module):
+    """
+    Physics-based Fresnel diffraction pattern computation.
+
+    At depth discontinuities (edges), Fresnel diffraction creates characteristic
+    intensity fringes. This class computes these patterns using the actual
+    Fresnel integrals:
+
+        C(w) = ∫₀ʷ cos(πt²/2) dt  (Fresnel cosine integral)
+        S(w) = ∫₀ʷ sin(πt²/2) dt  (Fresnel sine integral)
+
+    The diffraction intensity is:
+        I(w) = |C(w) + 0.5|² + |S(w) + 0.5|²
+
+    where w = x × √(2 / (λ × z)) is the Fresnel parameter.
+
+    Key insight: Intensity peaks occur at specific distances from edges,
+    not uniformly! This determines optimal Gaussian placement.
+
+    Applications:
+    - compute_edge_density(): Where to place more Gaussians
+    - get_fringe_positions(): Exact fringe peak locations
+    """
+
+    def __init__(
+        self,
+        wavelength: float = 0.05,
+        num_fringe_samples: int = 16,
+        lut_size: int = 1000,
+        lut_max_w: float = 5.0,
+    ):
+        """
+        Initialize FresnelDiffraction.
+
+        Args:
+            wavelength: Effective wavelength for diffraction computation
+            num_fringe_samples: Number of fringe positions to compute
+            lut_size: Size of Fresnel integral lookup table
+            lut_max_w: Maximum w value for LUT
+        """
+        super().__init__()
+
+        self.wavelength = wavelength
+        self.num_samples = num_fringe_samples
+        self.lut_size = lut_size
+        self.lut_max_w = lut_max_w
+
+        # Build Fresnel integral lookup table
+        self._build_fresnel_lut()
+
+    def _build_fresnel_lut(self):
+        """
+        Build lookup table for Fresnel integrals C(w) and S(w).
+
+        Uses numerical integration (cumulative sum approximation).
+        """
+        # Sample points for LUT
+        w = torch.linspace(0, self.lut_max_w, self.lut_size)
+
+        # Numerical integration using trapezoidal rule
+        dt = w[1] - w[0]
+        t = torch.linspace(0, self.lut_max_w, self.lut_size)
+
+        # C(w) = ∫₀ʷ cos(πt²/2) dt
+        cos_integrand = torch.cos(torch.pi * t ** 2 / 2)
+        C = torch.cumsum(cos_integrand, dim=0) * dt
+
+        # S(w) = ∫₀ʷ sin(πt²/2) dt
+        sin_integrand = torch.sin(torch.pi * t ** 2 / 2)
+        S = torch.cumsum(sin_integrand, dim=0) * dt
+
+        # Register as buffers (not parameters)
+        # Use _lut suffix to avoid conflict with fresnel_C/fresnel_S methods
+        self.register_buffer('_w_lut', w)
+        self.register_buffer('_C_lut', C)
+        self.register_buffer('_S_lut', S)
+
+    def _interp_lut(self, w: torch.Tensor, lut: torch.Tensor) -> torch.Tensor:
+        """
+        Linear interpolation from lookup table.
+
+        Args:
+            w: Fresnel parameter values to look up
+            lut: Lookup table (fresnel_C or fresnel_S)
+
+        Returns:
+            Interpolated values
+        """
+        # Clamp to valid range
+        w_clamped = torch.clamp(w, 0, self._w_lut[-1])
+
+        # Compute interpolation indices
+        idx_float = w_clamped / self._w_lut[-1] * (len(lut) - 1)
+        idx_low = idx_float.long()
+        idx_high = (idx_low + 1).clamp(max=len(lut) - 1)
+        frac = idx_float - idx_low.float()
+
+        # Linear interpolation
+        return lut[idx_low] * (1 - frac) + lut[idx_high] * frac
+
+    def fresnel_C(self, w: torch.Tensor) -> torch.Tensor:
+        """
+        Compute Fresnel cosine integral C(w) = ∫₀ʷ cos(πt²/2) dt.
+
+        Args:
+            w: Fresnel parameter values
+
+        Returns:
+            C(w) values
+        """
+        return self._interp_lut(w, self._C_lut)
+
+    def fresnel_S(self, w: torch.Tensor) -> torch.Tensor:
+        """
+        Compute Fresnel sine integral S(w) = ∫₀ʷ sin(πt²/2) dt.
+
+        Args:
+            w: Fresnel parameter values
+
+        Returns:
+            S(w) values
+        """
+        return self._interp_lut(w, self._S_lut)
+
+    def fresnel_intensity(self, w: torch.Tensor) -> torch.Tensor:
+        """
+        Compute Fresnel diffraction intensity at parameter w.
+
+        I(w) = |C(w) + 0.5|² + |S(w) + 0.5|²
+
+        The +0.5 accounts for the geometric shadow contribution
+        (unobstructed wave has C=S=0.5 at infinity).
+
+        Args:
+            w: Fresnel parameter values
+
+        Returns:
+            Intensity values (normalized around 0.5 for geometric edge)
+        """
+        C = self._interp_lut(w, self._C_lut)
+        S = self._interp_lut(w, self._S_lut)
+
+        # Intensity formula with geometric shadow contribution
+        I = (C + 0.5) ** 2 + (S + 0.5) ** 2
+
+        return I
+
+    def compute_fresnel_parameter(
+        self,
+        distance_from_edge: torch.Tensor,
+        depth: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute Fresnel parameter w from distance and depth.
+
+        w = distance × √(2 / (λ × z))
+
+        Args:
+            distance_from_edge: Distance from edge (can be signed)
+            depth: Depth values
+
+        Returns:
+            Fresnel parameter w
+        """
+        λ = self.wavelength
+        z = depth.clamp(min=0.1)  # Avoid division issues
+
+        w = torch.abs(distance_from_edge) * torch.sqrt(2 / (λ * z))
+
+        return w
+
+    def compute_edge_density(
+        self,
+        depth: torch.Tensor,           # (B, 1, H, W)
+        edge_mask: torch.Tensor,       # (B, 1, H, W) binary edges
+        distance_from_edge: torch.Tensor,  # (B, 1, H, W) signed distance
+    ) -> torch.Tensor:
+        """
+        Compute Gaussian density based on Fresnel diffraction pattern.
+
+        Returns a density map showing where to place more Gaussians.
+        Peaks occur at diffraction fringe locations, not uniformly at edges.
+
+        Args:
+            depth: Depth tensor
+            edge_mask: Binary mask of edge pixels
+            distance_from_edge: Signed distance from nearest edge
+
+        Returns:
+            Density map (B, 1, H, W) with higher values at fringe peaks
+        """
+        # Compute Fresnel parameter
+        w = self.compute_fresnel_parameter(distance_from_edge, depth)
+
+        # Get diffraction intensity pattern
+        intensity = self.fresnel_intensity(w)
+
+        # Density is modulated by intensity and masked to edge regions
+        density = intensity * edge_mask
+
+        return density
+
+    def get_fringe_positions(self, depth_at_edge: float) -> torch.Tensor:
+        """
+        Return the x-positions of diffraction fringes relative to edge.
+
+        Fringe maxima occur approximately at:
+            w_n ≈ √(2n + 0.5) for n = 0, 1, 2, ...
+
+        These are the OPTIMAL positions for Gaussian placement!
+
+        Args:
+            depth_at_edge: Depth value at the edge
+
+        Returns:
+            Tensor of fringe positions (distances from edge)
+        """
+        λ = self.wavelength
+
+        # Fringe maxima approximation
+        n = torch.arange(self.num_samples, device=self._w_lut.device)
+        w_n = torch.sqrt(2 * n + 0.5)
+
+        # Convert back to physical distance
+        # w = x × √(2 / (λ × z))  →  x = w × √(λ × z / 2)
+        x_n = w_n * torch.sqrt(torch.tensor(λ * depth_at_edge / 2))
+
+        return x_n
+
+    def forward(
+        self,
+        depth: torch.Tensor,
+        edge_mask: torch.Tensor,
+        distance_from_edge: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Compute diffraction-based density map.
+
+        Args:
+            depth: Depth tensor (B, 1, H, W)
+            edge_mask: Edge mask (B, 1, H, W)
+            distance_from_edge: Distance field (B, 1, H, W)
+
+        Returns:
+            Density map for Gaussian placement
+        """
+        return self.compute_edge_density(depth, edge_mask, distance_from_edge)
+
+    def extra_repr(self) -> str:
+        return (
+            f"wavelength={self.wavelength}, "
+            f"num_samples={self.num_samples}, "
+            f"lut_size={self.lut_size}"
+        )
+
+
 class FresnelEdgeDetector(nn.Module):
     """
     Learned edge detector inspired by Fresnel diffraction patterns.

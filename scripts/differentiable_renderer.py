@@ -669,6 +669,230 @@ class TileBasedRenderer(nn.Module):
         return image
 
 
+class WaveFieldRenderer(nn.Module):
+    """
+    Physics-based wave field renderer using complex amplitude accumulation.
+
+    Instead of alpha blending (intensity addition), this renderer:
+    1. Accumulates complex amplitudes: U = Σ A_i × exp(i×φ_i)
+    2. Converts to intensity at the end: I = |U|²
+
+    This properly models wave interference as per the Huygens-Fresnel principle,
+    where each Gaussian acts as a wavelet source contributing to the total field.
+
+    Key difference from TileBasedRenderer:
+    - TileBasedRenderer: alpha blending (intensity-based, no interference)
+    - WaveFieldRenderer: complex field accumulation (true wave interference)
+
+    Named after Augustin-Jean Fresnel's wave optics theory.
+    """
+
+    def __init__(
+        self,
+        image_width: int,
+        image_height: int,
+        background: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        max_radius: int = 64,
+    ):
+        super().__init__()
+        self.width = image_width
+        self.height = image_height
+        self.max_radius = max_radius
+        self.register_buffer('background', torch.tensor(background))
+
+    def _compute_radius(self, cov_2d: torch.Tensor) -> torch.Tensor:
+        """
+        Compute effective radius from 2D covariance (3σ rule).
+
+        Args:
+            cov_2d: (N, 2, 2) covariance matrices
+
+        Returns:
+            radii: (N,) effective radii in pixels
+        """
+        a = cov_2d[:, 0, 0]
+        b = cov_2d[:, 0, 1]
+        c = cov_2d[:, 1, 0]
+        d = cov_2d[:, 1, 1]
+
+        trace = a + d
+        det = a * d - b * c
+        det = torch.clamp(det, min=1e-6)
+
+        discriminant = torch.clamp(trace * trace - 4 * det, min=0)
+        max_eigenvalue = (trace + torch.sqrt(discriminant)) / 2
+
+        radii = 3.0 * torch.sqrt(torch.clamp(max_eigenvalue, min=1e-6))
+        radii = torch.clamp(radii, max=self.max_radius)
+
+        return radii
+
+    def forward(
+        self,
+        positions: torch.Tensor,      # (N, 3) world positions
+        scales: torch.Tensor,          # (N, 3) scales
+        rotations: torch.Tensor,       # (N, 4) quaternions (w,x,y,z)
+        colors: torch.Tensor,          # (N, 3) RGB colors - treated as amplitude
+        opacities: torch.Tensor,       # (N,) opacity values
+        camera: Camera,
+        return_depth: bool = False,
+        phases: Optional[torch.Tensor] = None,  # (N,) phase values - REQUIRED for wave rendering
+    ) -> torch.Tensor:
+        """
+        Render Gaussians using complex wave field accumulation.
+
+        Physics: U(P) = Σ A_i × exp(i × φ_i)
+                 I = |U|² = Re(U)² + Im(U)²
+
+        Args:
+            positions: (N, 3) Gaussian centers in world space
+            scales: (N, 3) scale along each axis
+            rotations: (N, 4) quaternions (w, x, y, z)
+            colors: (N, 3) RGB colors [0, 1] - treated as wave amplitude
+            opacities: (N,) opacity values [0, 1]
+            camera: Camera parameters
+            return_depth: If True, also return depth map
+            phases: (N,) phase values in radians - REQUIRED for wave rendering
+
+        Returns:
+            image: (3, H, W) rendered RGB image
+            depth: (H, W) depth map (if return_depth=True)
+        """
+        # Phases are required for wave field rendering
+        if phases is None:
+            raise ValueError("WaveFieldRenderer requires phases tensor. Use PhysicsDirectPatchDecoder to generate phases.")
+
+        N = positions.shape[0]
+        device = positions.device
+        H, W = self.height, self.width
+
+        background = self.background.to(device)
+
+        # Compute 2D covariance and projections
+        cov_2d, means_2d, depths = compute_2d_covariance(
+            positions, scales, rotations, camera
+        )
+
+        # Compute effective radius for each Gaussian
+        radii = self._compute_radius(cov_2d)
+
+        # Filter Gaussians outside view frustum
+        visible = (depths > camera.near) & (depths < camera.far)
+        visible &= (means_2d[:, 0] + radii > 0) & (means_2d[:, 0] - radii < W)
+        visible &= (means_2d[:, 1] + radii > 0) & (means_2d[:, 1] - radii < H)
+
+        if visible.sum() == 0:
+            img = background.view(3, 1, 1).expand(3, H, W)
+            if return_depth:
+                return img, torch.zeros(H, W, device=device)
+            return img
+
+        means_2d = means_2d[visible]
+        cov_2d = cov_2d[visible]
+        colors = colors[visible]
+        opacities = opacities[visible]
+        depths = depths[visible]
+        radii = radii[visible]
+        phases = phases[visible]
+
+        N_visible = means_2d.shape[0]
+
+        # Initialize complex wave field (real + imaginary per color channel)
+        # Shape: (H, W, 3) for each component
+        wave_real = torch.zeros(H, W, 3, device=device)
+        wave_imag = torch.zeros(H, W, 3, device=device)
+        accumulated_depth = torch.zeros(H, W, device=device)
+        total_weight = torch.zeros(H, W, device=device)
+
+        # Compute inverse covariance for all Gaussians
+        cov_reg = cov_2d + 1e-4 * torch.eye(2, device=device).unsqueeze(0)
+        cov_inv = torch.linalg.inv(cov_reg)
+
+        # Process each Gaussian - accumulate complex field
+        for i in range(N_visible):
+            mean = means_2d[i]
+            radius = radii[i].item()
+            inv_cov = cov_inv[i]
+            color = colors[i]
+            opacity = opacities[i]
+            depth = depths[i]
+            phase = phases[i]
+
+            # Compute bounding box
+            x0 = max(0, int(mean[0].item() - radius))
+            x1 = min(W, int(mean[0].item() + radius) + 1)
+            y0 = max(0, int(mean[1].item() - radius))
+            y1 = min(H, int(mean[1].item() + radius) + 1)
+
+            if x0 >= x1 or y0 >= y1:
+                continue
+
+            # Create local coordinate grid
+            local_y, local_x = torch.meshgrid(
+                torch.arange(y0, y1, device=device, dtype=torch.float32),
+                torch.arange(x0, x1, device=device, dtype=torch.float32),
+                indexing='ij'
+            )
+
+            # Compute difference from mean
+            dx = local_x - mean[0]
+            dy = local_y - mean[1]
+
+            # Mahalanobis distance
+            a, b = inv_cov[0, 0], inv_cov[0, 1]
+            c, d = inv_cov[1, 0], inv_cov[1, 1]
+            mahal = a * dx * dx + (b + c) * dx * dy + d * dy * dy
+
+            # Gaussian value (amplitude envelope)
+            gauss_val = torch.exp(-0.5 * mahal)
+
+            # Amplitude = opacity × gaussian_weight
+            amplitude = gauss_val * opacity  # (h, w)
+
+            # Complex contribution: A × exp(iφ) = A×cos(φ) + i×A×sin(φ)
+            cos_phase = torch.cos(phase)
+            sin_phase = torch.sin(phase)
+
+            # Accumulate complex field (color modulates amplitude)
+            # wave_real += A × color × cos(φ)
+            # wave_imag += A × color × sin(φ)
+            wave_real[y0:y1, x0:x1] += amplitude.unsqueeze(-1) * color.view(1, 1, 3) * cos_phase
+            wave_imag[y0:y1, x0:x1] += amplitude.unsqueeze(-1) * color.view(1, 1, 3) * sin_phase
+
+            # Track depth (weighted by amplitude for depth map)
+            accumulated_depth[y0:y1, x0:x1] += amplitude * depth
+            total_weight[y0:y1, x0:x1] += amplitude
+
+        # Convert to intensity: I = |U|² = real² + imag²
+        intensity = wave_real ** 2 + wave_imag ** 2  # (H, W, 3)
+
+        # Convert intensity to "color-like" values via sqrt
+        # (intensity is energy, we want amplitude for display)
+        rendered = torch.sqrt(intensity + 1e-8)
+
+        # Normalize - wave superposition can exceed 1.0 constructively
+        # Use differentiable normalization (no Python control flow for gradient safety)
+        max_val = rendered.max().clamp(min=1.0)
+        rendered = rendered / max_val
+
+        rendered = torch.clamp(rendered, 0, 1)
+
+        # Add background where total amplitude is low
+        total_amplitude = torch.sqrt((wave_real ** 2 + wave_imag ** 2).sum(dim=-1, keepdim=True) + 1e-8)
+        total_amplitude = total_amplitude.clamp(0, 1)
+        rendered = rendered + background.view(1, 1, 3) * (1 - total_amplitude)
+
+        # Transpose to (3, H, W)
+        image = rendered.permute(2, 0, 1)
+        image = torch.clamp(image, 0, 1)
+
+        if return_depth:
+            # Normalize depth by total weight
+            depth_map = accumulated_depth / (total_weight + 1e-8)
+            return image, depth_map
+        return image
+
+
 class SimplifiedRenderer(nn.Module):
     """
     Simplified renderer for faster training.

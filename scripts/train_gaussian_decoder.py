@@ -67,10 +67,18 @@ from differentiable_renderer import (
     DifferentiableGaussianRenderer,
     TileBasedRenderer,
     SimplifiedRenderer,
+    WaveFieldRenderer,
     Camera,
     load_gaussians_from_binary,
     save_gaussians_to_binary
 )
+
+# Physics-derived components (may not be available during incremental development)
+try:
+    from gaussian_decoder_models import PhysicsDirectPatchDecoder
+    PHYSICS_DECODER_AVAILABLE = True
+except ImportError:
+    PHYSICS_DECODER_AVAILABLE = False
 
 
 @dataclass
@@ -120,6 +128,31 @@ class TrainingConfig:
     # Logging
     log_interval: int = 10
     save_interval: int = 10
+
+
+@dataclass
+class PhysicsConfig:
+    """
+    Configuration for physics-derived Fresnel rendering.
+
+    These settings control the actual wave optics algorithms,
+    as opposed to the heuristic Fresnel-inspired settings in TrainingConfig.
+    """
+    # Wave optics rendering
+    use_wave_rendering: bool = False      # Use WaveFieldRenderer (complex field accumulation)
+    wavelength: float = 0.05              # Effective wavelength in [0,1] depth units
+    learnable_wavelength: bool = True     # Allow network to learn optimal λ
+
+    # Physics-based Fresnel zones
+    use_physics_zones: bool = False       # Use PhysicsFresnelZones (sqrt(n) spacing)
+    num_zones: int = 8                    # Number of Fresnel zones
+    focal_depth: float = 0.5              # Focal plane depth
+
+    # Diffraction-based placement
+    use_diffraction_placement: bool = False  # Use FresnelDiffraction for Gaussian placement
+
+    # Comparison mode
+    compare_with_baseline: bool = False   # Render both physics and baseline, log comparison
 
 
 class ImageDataset(Dataset):
@@ -621,6 +654,20 @@ def main():
     parser.add_argument('--phase_amplitude', type=float, default=0.25,
                         help='Phase interference amplitude (0-1, default: 0.25)')
 
+    # Physics-derived algorithms (actual wave optics, not heuristics)
+    parser.add_argument('--use_wave_rendering', action='store_true',
+                        help='Use WaveFieldRenderer with complex wave field accumulation (true interference)')
+    parser.add_argument('--wavelength', type=float, default=0.05,
+                        help='Effective wavelength for phase computation (default: 0.05)')
+    parser.add_argument('--learnable_wavelength', action='store_true',
+                        help='Allow network to learn optimal wavelength')
+    parser.add_argument('--use_physics_zones', action='store_true',
+                        help='Use PhysicsFresnelZones with sqrt(n) zone spacing (not uniform)')
+    parser.add_argument('--use_diffraction_placement', action='store_true',
+                        help='Use FresnelDiffraction for Gaussian placement at fringe peaks')
+    parser.add_argument('--focal_depth', type=float, default=0.5,
+                        help='Focal plane depth for phase computation (default: 0.5)')
+
     args = parser.parse_args()
 
     # Create config
@@ -647,6 +694,17 @@ def main():
         phase_amplitude=args.phase_amplitude
     )
 
+    # Create physics config
+    physics_config = PhysicsConfig(
+        use_wave_rendering=args.use_wave_rendering,
+        wavelength=args.wavelength,
+        learnable_wavelength=args.learnable_wavelength,
+        use_physics_zones=args.use_physics_zones,
+        num_zones=args.num_fresnel_zones,
+        focal_depth=args.focal_depth,
+        use_diffraction_placement=args.use_diffraction_placement,
+    )
+
     print("=" * 60)
     print(f"Training Experiment {config.experiment}")
     print("=" * 60)
@@ -670,6 +728,18 @@ def main():
             print(f"  - Edge-aware: scale_factor={config.edge_scale_factor}, opacity_boost={config.edge_opacity_boost}")
         if config.use_phase_blending:
             print(f"  - Phase blending: amplitude={config.phase_amplitude}")
+
+    # Print physics-derived settings
+    physics_enabled = physics_config.use_wave_rendering or physics_config.use_physics_zones or physics_config.use_diffraction_placement
+    if physics_enabled:
+        print("Physics-derived wave optics:")
+        if physics_config.use_wave_rendering:
+            print(f"  - Wave rendering: ENABLED (complex field accumulation)")
+        print(f"  - Wavelength: {physics_config.wavelength} (learnable={physics_config.learnable_wavelength})")
+        if physics_config.use_physics_zones:
+            print(f"  - Physics zones: ENABLED (sqrt(n) spacing, focal_depth={physics_config.focal_depth})")
+        if physics_config.use_diffraction_placement:
+            print(f"  - Diffraction placement: ENABLED (fringe-based Gaussian density)")
 
     # Create dataset and dataloader
     dataset = ImageDataset(
@@ -704,30 +774,57 @@ def main():
     if config.experiment == 1:
         model = SAAGRefinementNet()
     elif config.experiment == 2:
-        # DirectPatchDecoder with optional Fresnel enhancements
-        model = DirectPatchDecoder(
-            gaussians_per_patch=config.gaussians_per_patch,
-            use_fresnel_zones=config.use_fresnel_zones,
-            num_fresnel_zones=config.num_fresnel_zones,
-            use_edge_aware=config.use_edge_aware,
-            use_phase_output=config.use_phase_blending,
-            edge_scale_factor=config.edge_scale_factor,
-            edge_opacity_boost=config.edge_opacity_boost
+        # Check if physics-derived decoder should be used
+        use_physics_decoder = (
+            physics_config.use_wave_rendering or
+            physics_config.use_physics_zones or
+            physics_config.use_diffraction_placement
         )
+
+        if use_physics_decoder and PHYSICS_DECODER_AVAILABLE:
+            # PhysicsDirectPatchDecoder with physics-derived phase
+            print("Using PhysicsDirectPatchDecoder (physics-derived phase)")
+            model = PhysicsDirectPatchDecoder(
+                gaussians_per_patch=config.gaussians_per_patch,
+                wavelength=physics_config.wavelength,
+                learnable_wavelength=physics_config.learnable_wavelength,
+                focal_depth=physics_config.focal_depth,
+                use_diffraction_placement=physics_config.use_diffraction_placement,
+            )
+        else:
+            # DirectPatchDecoder with optional heuristic Fresnel enhancements
+            model = DirectPatchDecoder(
+                gaussians_per_patch=config.gaussians_per_patch,
+                use_fresnel_zones=config.use_fresnel_zones,
+                num_fresnel_zones=config.num_fresnel_zones,
+                use_edge_aware=config.use_edge_aware,
+                use_phase_output=config.use_phase_blending,
+                edge_scale_factor=config.edge_scale_factor,
+                edge_opacity_boost=config.edge_opacity_boost
+            )
     else:  # 3
         model = FeatureGuidedSAAG()
 
     model = model.to(config.device)
     print(f"\nModel parameters: {count_parameters(model):,}")
 
-    # Create renderer (TileBasedRenderer for memory efficiency - O(N × r²) vs O(N × H × W))
-    # With optional Fresnel phase blending
-    renderer = TileBasedRenderer(
-        config.image_size,
-        config.image_size,
-        use_phase_blending=config.use_phase_blending,
-        phase_amplitude=config.phase_amplitude
-    )
+    # Create renderer
+    if physics_config.use_wave_rendering:
+        # WaveFieldRenderer for true complex wave field accumulation
+        print("Using WaveFieldRenderer (complex wave field accumulation)")
+        renderer = WaveFieldRenderer(
+            config.image_size,
+            config.image_size,
+        )
+    else:
+        # TileBasedRenderer for memory efficiency - O(N × r²) vs O(N × H × W)
+        # With optional heuristic Fresnel phase blending
+        renderer = TileBasedRenderer(
+            config.image_size,
+            config.image_size,
+            use_phase_blending=config.use_phase_blending,
+            phase_amplitude=config.phase_amplitude
+        )
     renderer = renderer.to(config.device)
 
     # Create camera

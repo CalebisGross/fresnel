@@ -26,10 +26,19 @@ from typing import Optional, Tuple, Dict
 
 # Import Fresnel utilities
 try:
-    from fresnel_zones import FresnelZones, FresnelEdgeDetector
+    from fresnel_zones import FresnelZones, FresnelEdgeDetector, PhysicsFresnelZones
     FRESNEL_AVAILABLE = True
+    PHYSICS_FRESNEL_AVAILABLE = True
 except ImportError:
     FRESNEL_AVAILABLE = False
+    PHYSICS_FRESNEL_AVAILABLE = False
+
+# FresnelDiffraction may not exist yet during incremental development
+try:
+    from fresnel_zones import FresnelDiffraction
+    DIFFRACTION_AVAILABLE = True
+except ImportError:
+    DIFFRACTION_AVAILABLE = False
 
 
 def rotation_6d_to_quaternion(rot_6d: torch.Tensor) -> torch.Tensor:
@@ -58,46 +67,59 @@ def rotation_6d_to_quaternion(rot_6d: torch.Tensor) -> torch.Tensor:
     # Build rotation matrix
     R = torch.stack([b1, b2, b3], dim=-1)  # (..., 3, 3)
 
-    # Convert rotation matrix to quaternion
+    # Convert rotation matrix to quaternion using ONNX-compatible operations
+    # Uses torch.where instead of boolean mask indexing for ONNX compatibility
     # Based on: https://www.euclideanspace.com/maths/geometry/rotations/conversions/matrixToQuaternion/
     batch_shape = R.shape[:-2]
-    R = R.reshape(-1, 3, 3)
+    R_flat = R.reshape(-1, 3, 3)
 
-    trace = R[:, 0, 0] + R[:, 1, 1] + R[:, 2, 2]
+    R00, R01, R02 = R_flat[:, 0, 0], R_flat[:, 0, 1], R_flat[:, 0, 2]
+    R10, R11, R12 = R_flat[:, 1, 0], R_flat[:, 1, 1], R_flat[:, 1, 2]
+    R20, R21, R22 = R_flat[:, 2, 0], R_flat[:, 2, 1], R_flat[:, 2, 2]
 
-    quat = torch.zeros(R.shape[0], 4, device=R.device, dtype=R.dtype)
+    trace = R00 + R11 + R22
 
+    # Compute all four cases (avoids boolean indexing for ONNX compatibility)
     # Case 1: trace > 0
-    mask1 = trace > 0
-    s1 = torch.sqrt(trace[mask1] + 1.0) * 2  # s = 4 * qw
-    quat[mask1, 0] = 0.25 * s1
-    quat[mask1, 1] = (R[mask1, 2, 1] - R[mask1, 1, 2]) / s1
-    quat[mask1, 2] = (R[mask1, 0, 2] - R[mask1, 2, 0]) / s1
-    quat[mask1, 3] = (R[mask1, 1, 0] - R[mask1, 0, 1]) / s1
+    s1 = torch.sqrt(torch.clamp(trace + 1.0, min=1e-10)) * 2
+    qw1 = 0.25 * s1
+    qx1 = (R21 - R12) / s1
+    qy1 = (R02 - R20) / s1
+    qz1 = (R10 - R01) / s1
 
-    # Case 2: R[0,0] > R[1,1] and R[0,0] > R[2,2]
-    mask2 = ~mask1 & (R[:, 0, 0] > R[:, 1, 1]) & (R[:, 0, 0] > R[:, 2, 2])
-    s2 = torch.sqrt(1.0 + R[mask2, 0, 0] - R[mask2, 1, 1] - R[mask2, 2, 2]) * 2
-    quat[mask2, 0] = (R[mask2, 2, 1] - R[mask2, 1, 2]) / s2
-    quat[mask2, 1] = 0.25 * s2
-    quat[mask2, 2] = (R[mask2, 0, 1] + R[mask2, 1, 0]) / s2
-    quat[mask2, 3] = (R[mask2, 0, 2] + R[mask2, 2, 0]) / s2
+    # Case 2: R00 > R11 and R00 > R22
+    s2 = torch.sqrt(torch.clamp(1.0 + R00 - R11 - R22, min=1e-10)) * 2
+    qw2 = (R21 - R12) / s2
+    qx2 = 0.25 * s2
+    qy2 = (R01 + R10) / s2
+    qz2 = (R02 + R20) / s2
 
-    # Case 3: R[1,1] > R[2,2]
-    mask3 = ~mask1 & ~mask2 & (R[:, 1, 1] > R[:, 2, 2])
-    s3 = torch.sqrt(1.0 + R[mask3, 1, 1] - R[mask3, 0, 0] - R[mask3, 2, 2]) * 2
-    quat[mask3, 0] = (R[mask3, 0, 2] - R[mask3, 2, 0]) / s3
-    quat[mask3, 1] = (R[mask3, 0, 1] + R[mask3, 1, 0]) / s3
-    quat[mask3, 2] = 0.25 * s3
-    quat[mask3, 3] = (R[mask3, 1, 2] + R[mask3, 2, 1]) / s3
+    # Case 3: R11 > R22
+    s3 = torch.sqrt(torch.clamp(1.0 + R11 - R00 - R22, min=1e-10)) * 2
+    qw3 = (R02 - R20) / s3
+    qx3 = (R01 + R10) / s3
+    qy3 = 0.25 * s3
+    qz3 = (R12 + R21) / s3
 
-    # Case 4: else
-    mask4 = ~mask1 & ~mask2 & ~mask3
-    s4 = torch.sqrt(1.0 + R[mask4, 2, 2] - R[mask4, 0, 0] - R[mask4, 1, 1]) * 2
-    quat[mask4, 0] = (R[mask4, 1, 0] - R[mask4, 0, 1]) / s4
-    quat[mask4, 1] = (R[mask4, 0, 2] + R[mask4, 2, 0]) / s4
-    quat[mask4, 2] = (R[mask4, 1, 2] + R[mask4, 2, 1]) / s4
-    quat[mask4, 3] = 0.25 * s4
+    # Case 4: else (R22 is largest)
+    s4 = torch.sqrt(torch.clamp(1.0 + R22 - R00 - R11, min=1e-10)) * 2
+    qw4 = (R10 - R01) / s4
+    qx4 = (R02 + R20) / s4
+    qy4 = (R12 + R21) / s4
+    qz4 = 0.25 * s4
+
+    # Select case using torch.where (ONNX-compatible)
+    cond1 = trace > 0
+    cond2 = (R00 > R11) & (R00 > R22)
+    cond3 = R11 > R22
+
+    # Nested selection: case1 -> case2 -> case3 -> case4
+    qw = torch.where(cond1, qw1, torch.where(cond2, qw2, torch.where(cond3, qw3, qw4)))
+    qx = torch.where(cond1, qx1, torch.where(cond2, qx2, torch.where(cond3, qx3, qx4)))
+    qy = torch.where(cond1, qy1, torch.where(cond2, qy2, torch.where(cond3, qy3, qy4)))
+    qz = torch.where(cond1, qz1, torch.where(cond2, qz2, torch.where(cond3, qz3, qz4)))
+
+    quat = torch.stack([qw, qx, qy, qz], dim=-1)
 
     # Normalize
     quat = F.normalize(quat, dim=-1)
@@ -571,6 +593,193 @@ class DirectPatchDecoder(nn.Module):
             result['edge_strength'] = edge_strength  # (B, 1, H, W) - useful for visualization/debugging
 
         return result
+
+
+# =============================================================================
+# Physics-Derived Direct Patch Decoder
+# =============================================================================
+
+class PhysicsDirectPatchDecoder(nn.Module):
+    """
+    DirectPatchDecoder with physics-derived phase computation.
+
+    Instead of predicting arbitrary phases or using heuristics, this decoder
+    computes phases from optical path lengths using the wave equation:
+
+        φ = (2π / λ) × path_length
+
+    Key differences from DirectPatchDecoder:
+    1. Phase is COMPUTED from z-position, not predicted
+    2. Uses PhysicsFresnelZones for proper sqrt(n) zone spacing
+    3. Optionally uses FresnelDiffraction for edge placement
+
+    This connects the neural network to actual wave optics physics.
+    """
+
+    def __init__(
+        self,
+        feature_dim: int = 384,
+        gaussians_per_patch: int = 8,
+        hidden_dims: list = [512, 512, 256, 128],
+        dropout: float = 0.1,
+        wavelength: float = 0.05,
+        learnable_wavelength: bool = True,
+        focal_depth: float = 0.5,
+        use_diffraction_placement: bool = False,
+    ):
+        """
+        Initialize PhysicsDirectPatchDecoder.
+
+        Args:
+            feature_dim: DINOv2 feature dimension (384)
+            gaussians_per_patch: Number of Gaussians per patch
+            hidden_dims: MLP hidden layer dimensions
+            dropout: Dropout rate
+            wavelength: Initial wavelength for phase computation
+            learnable_wavelength: If True, wavelength is learnable
+            focal_depth: Focal plane depth for phase computation
+            use_diffraction_placement: If True, use Fresnel diffraction for edge placement
+        """
+        super().__init__()
+
+        self.feature_dim = feature_dim
+        self.gaussians_per_patch = gaussians_per_patch
+        self.wavelength = wavelength
+        self.use_diffraction_placement = use_diffraction_placement
+
+        # Output per Gaussian: position (3) + scale (3) + rotation_6d (6) + color (3) + opacity (1) = 16
+        # Note: NO phase output - it's computed from physics!
+        output_per_gaussian = 16
+        self.output_per_gaussian = output_per_gaussian
+        output_dim = gaussians_per_patch * output_per_gaussian
+
+        # Per-patch MLP (same as DirectPatchDecoder)
+        self.mlp = MLP(feature_dim, hidden_dims, output_dim, dropout)
+
+        # Learned initial depth offset
+        self.depth_offset = nn.Parameter(torch.tensor(-2.0))
+
+        # Physics components
+        if PHYSICS_FRESNEL_AVAILABLE:
+            self.fresnel_zones = PhysicsFresnelZones(
+                wavelength=wavelength,
+                focal_depth=focal_depth,
+                learnable_wavelength=learnable_wavelength,
+            )
+        else:
+            self.fresnel_zones = None
+            print("Warning: PhysicsFresnelZones not available, phases will be zero")
+
+        # Optional diffraction component for edge placement
+        if use_diffraction_placement and DIFFRACTION_AVAILABLE:
+            self.diffraction = FresnelDiffraction(wavelength=wavelength)
+        else:
+            self.diffraction = None
+
+    def forward(
+        self,
+        features: torch.Tensor,           # (B, 384, 37, 37) DINOv2 features
+        depth: Optional[torch.Tensor] = None,  # (B, 1, H, W) depth map
+        image_size: Tuple[int, int] = (518, 518)
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Predict Gaussians with physics-derived phases.
+
+        The key difference from DirectPatchDecoder is that phases are
+        COMPUTED from z-positions using the wave equation, not predicted.
+
+        Returns:
+            Dict with Gaussian parameters including physics-derived 'phases'
+        """
+        B, C, H, W = features.shape  # (B, 384, 37, 37)
+        K = self.gaussians_per_patch
+        device = features.device
+        output_dim = self.output_per_gaussian
+
+        # Flatten spatial dims for per-patch processing
+        features_flat = features.permute(0, 2, 3, 1).reshape(B * H * W, C)
+
+        # Predict Gaussian params (excluding phase)
+        outputs = self.mlp(features_flat)
+        outputs = outputs.reshape(B, H, W, K, output_dim)
+
+        # Parse outputs (same as DirectPatchDecoder, but no phase)
+        raw_pos = outputs[..., 0:3]
+        raw_scale = outputs[..., 3:6]
+        rot_6d = outputs[..., 6:12]
+        raw_color = outputs[..., 12:15]
+        raw_opacity = outputs[..., 15:16]
+
+        # Create position grid
+        y_grid, x_grid = torch.meshgrid(
+            torch.linspace(-1, 1, H, device=device),
+            torch.linspace(-1, 1, W, device=device),
+            indexing='ij'
+        )
+
+        base_x = x_grid.unsqueeze(0).unsqueeze(-1).expand(B, -1, -1, K)
+        base_y = y_grid.unsqueeze(0).unsqueeze(-1).expand(B, -1, -1, K)
+
+        # Depth handling
+        if depth is not None:
+            depth_grid = F.interpolate(depth, (H, W), mode='bilinear', align_corners=False)
+            depth_grid = depth_grid.squeeze(1).unsqueeze(-1).expand(-1, -1, -1, K)
+            base_z = self.depth_offset + depth_grid * (-2)
+        else:
+            base_z = torch.full((B, H, W, K), self.depth_offset.item(), device=device)
+
+        # Compute positions
+        positions = torch.stack([
+            base_x + raw_pos[..., 0] * 0.25,
+            base_y + raw_pos[..., 1] * 0.25,
+            base_z + raw_pos[..., 2] * 0.25
+        ], dim=-1)
+
+        # Scale, rotation, color, opacity (same as DirectPatchDecoder)
+        scales = F.softplus(raw_scale + 1.0) * 0.15
+        rotations = rotation_6d_to_quaternion(rot_6d)
+        colors = torch.sigmoid(raw_color)
+        opacities = torch.sigmoid(raw_opacity).squeeze(-1)
+
+        # =========================================================================
+        # PHYSICS-DERIVED PHASE (the key difference!)
+        # Phase = (2π / λ) × path_length_from_camera
+        # =========================================================================
+        if self.fresnel_zones is not None:
+            # Get z-positions (depth)
+            z_positions = positions[..., 2]  # (B, H, W, K)
+
+            # Normalize z to [0, 1] range for phase computation
+            z_min = z_positions.min()
+            z_max = z_positions.max()
+            z_normalized = (z_positions - z_min) / (z_max - z_min + 1e-8)
+
+            # Compute phase from depth using wave equation
+            phases = self.fresnel_zones.depth_to_phase(z_normalized)
+
+            # Wrap to [0, 2π]
+            phases = phases % (2 * torch.pi)
+        else:
+            # Fallback: zero phase
+            phases = torch.zeros_like(positions[..., 0])
+
+        # Flatten spatial dims
+        N = H * W * K
+        positions = positions.reshape(B, N, 3)
+        scales = scales.reshape(B, N, 3)
+        rotations = rotations.reshape(B, N, 4)
+        colors = colors.reshape(B, N, 3)
+        opacities = opacities.reshape(B, N)
+        phases = phases.reshape(B, N)
+
+        return {
+            'positions': positions,
+            'scales': scales,
+            'rotations': rotations,
+            'colors': colors,
+            'opacities': opacities,
+            'phases': phases,  # Physics-derived!
+        }
 
 
 # =============================================================================
