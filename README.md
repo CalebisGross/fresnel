@@ -83,6 +83,34 @@ python scripts/train_gaussian_decoder.py \
 | `--edge_scale_factor` | Scale reduction at edges (default: 0.5) |
 | `--edge_opacity_boost` | Opacity increase at edges (default: 0.2) |
 
+### Physics-Grounded Wave Optics
+
+Beyond heuristic-inspired features, we implement actual wave optics physics based on research from Nature holography papers, D²NN (Science), and physics-informed neural networks:
+
+| Feature | Physics Basis | Implementation |
+|---------|---------------|----------------|
+| **Per-Channel Wavelength** | RGB light has different wavelengths (λ_R:λ_G:λ_B ≈ 1.27:1.0:0.82) | `MultiWavelengthPhysics` class |
+| **Wave Equation Loss** | Helmholtz constraint: ∇²U + k²U = 0 | Physics-informed regularization |
+| **Angular Spectrum Method** | FFT-based wave propagation: U(z) = F⁻¹{F{U(0)} × H(z)} | `ASMWaveFieldRenderer` |
+| **Diffractive Layers** | D²NN-inspired learnable amplitude/phase modulation | `DiffractiveLayer` class |
+
+```bash
+# Train with physics-grounded wave optics
+python scripts/train_gaussian_decoder.py \
+    --data_dir images/training \
+    --use_wave_rendering \
+    --wave_equation_weight 0.01 \
+    --use_multi_wavelength
+```
+
+| Physics Flag | Description |
+|--------------|-------------|
+| `--use_wave_rendering` | Complex wave field accumulation (true interference) |
+| `--wavelength` | Effective wavelength for phase computation (default: 0.05) |
+| `--learnable_wavelength` | Allow network to learn optimal wavelength |
+| `--wave_equation_weight` | Weight for Helmholtz equation constraint loss |
+| `--use_multi_wavelength` | Per-channel RGB wavelength physics |
+
 ---
 
 ## Mission
@@ -433,6 +461,10 @@ Things we're exploring or might explore:
 - **Fresnel depth zones** ✅ - Quantize depth into discrete zones (like Fresnel zone plates) for hierarchical organization and better depth discontinuity handling
 - **Fresnel diffraction edges** ✅ - Increase Gaussian density at depth discontinuities, mimicking how diffraction creates bright fringes at boundaries
 - **Wave interference blending** ✅ - Phase-modulated alpha compositing for smoother Gaussian transitions, inspired by wave interference patterns
+- **Per-channel wavelength physics** ✅ - RGB wavelengths (λ_R:λ_G:λ_B ≈ 1.27:1.0:0.82) for chromatic aberration and realistic interference
+- **Wave equation loss (PINN)** ✅ - Helmholtz constraint (∇²U + k²U = 0) as physics-informed regularization
+- **Angular Spectrum Method** ✅ - FFT-based wave propagation for accurate near-field holographic rendering
+- **Diffractive layers (D²NN)** ✅ - Learnable amplitude/phase modulation inspired by diffractive deep neural networks
 
 ### In Progress
 
@@ -457,6 +489,9 @@ Things we're exploring or might explore:
 - [TripoSR: Fast 3D Object Reconstruction from a Single Image](https://arxiv.org/abs/2403.02151)
 - [Depth Anything V2](https://arxiv.org/abs/2406.09414)
 - [FDGaussian: Fast Gaussian Splatting from Single Image](https://arxiv.org/abs/2403.10242)
+- [Towards Real-Time Photorealistic 3D Holography (Nature)](https://www.nature.com/articles/s41586-020-03152-0) - ASM + CNN
+- [All-Optical Machine Learning Using D²NN (Science)](https://www.science.org/doi/10.1126/science.aat8084) - Diffractive networks
+- [Complex-Valued Holographic Radiance Fields](https://arxiv.org/abs/2506.08350) - Complex Gaussian splatting
 
 ### Code
 
