@@ -366,6 +366,8 @@ def compute_losses(
     if vlm_density is not None and config.use_vlm_guidance and config.vlm_weight > 0:
         # Compute per-pixel L1 loss
         pixel_loss = torch.abs(rendered - target)  # (B, 3, H, W)
+        # Detach vlm_density - it's a spatial weight, not part of the learned model
+        vlm_density = vlm_density.detach()
         # Resize density to match rendered size if needed
         if vlm_density.shape[-2:] != rendered.shape[-2:]:
             vlm_density = F.interpolate(vlm_density, size=rendered.shape[-2:], mode='bilinear', align_corners=False)

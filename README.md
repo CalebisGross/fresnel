@@ -1,5 +1,9 @@
 # Fresnel
 
+<p align="center">
+  <img src="logo.png" alt="Fresnel Logo" width="400">
+</p>
+
 **Open-source single-image to 3D reconstruction, optimized for consumer AMD GPUs.**
 
 *Named after Augustin-Jean Fresnel (1788-1827), the physicist who revolutionized optics*
@@ -101,18 +105,9 @@ Create an efficient, high-quality, open-source tool that converts single images 
 
 ### High-Level Pipeline
 
-```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐     ┌──────────────┐
-│ Input Image │────▶│ Depth + Normal│────▶│ Gaussian Decoder│────▶│ 3D Gaussians │
-│   (RGB)     │     │   Estimation  │     │  (our custom)   │     │  (output)    │
-└─────────────┘     └──────────────┘     └─────────────────┘     └──────────────┘
-                           │                      │                      │
-                           │                      │                      ▼
-                           │                      │              ┌──────────────┐
-                           └──────────────────────┴─────────────▶│ Real-time    │
-                                                                 │ Preview      │
-                                                                 └──────────────┘
-```
+<p align="center">
+  <img src="diagram.png" alt="Fresnel Pipeline" width="700">
+</p>
 
 ### Components
 

@@ -323,10 +323,11 @@ class DifferentiableGaussianRenderer(nn.Module):
         visible &= (means_2d[:, 1] > -100) & (means_2d[:, 1] < H + 100)
 
         if visible.sum() == 0:
-            # No visible Gaussians
-            img = background.view(3, 1, 1).expand(3, H, W)
+            # No visible Gaussians - maintain gradient connection
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            img = background.view(3, 1, 1).expand(3, H, W) + grad_anchor
             if return_depth:
-                return img, torch.zeros(H, W, device=device)
+                return img, torch.zeros(H, W, device=device) + grad_anchor
             return img
 
         means_2d = means_2d[visible]
@@ -396,6 +397,12 @@ class DifferentiableGaussianRenderer(nn.Module):
 
         # Clamp
         image = torch.clamp(image, 0, 1)
+
+        # Ensure gradient connection
+        if not image.requires_grad:
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            image = image + grad_anchor
+            accumulated_depth = accumulated_depth + grad_anchor
 
         if return_depth:
             return image, accumulated_depth
@@ -536,9 +543,12 @@ class TileBasedRenderer(nn.Module):
         visible &= (means_2d[:, 1] + radii > 0) & (means_2d[:, 1] - radii < H)
 
         if visible.sum() == 0:
-            img = background.view(3, 1, 1).expand(3, H, W)
+            # Return background but maintain gradient connection to inputs
+            # Add a zero-weighted sum of inputs to preserve gradient flow for backprop
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            img = background.view(3, 1, 1).expand(3, H, W) + grad_anchor
             if return_depth:
-                return img, torch.zeros(H, W, device=device)
+                return img, torch.zeros(H, W, device=device) + grad_anchor
             return img
 
         means_2d = means_2d[visible]
@@ -664,6 +674,13 @@ class TileBasedRenderer(nn.Module):
         image = accumulated_color.permute(2, 0, 1)
         image = torch.clamp(image, 0, 1)
 
+        # Ensure gradient connection even if no Gaussians contributed
+        # (e.g., all bounding boxes were invalid)
+        if not image.requires_grad:
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            image = image + grad_anchor
+            accumulated_depth = accumulated_depth + grad_anchor
+
         if return_depth:
             return image, accumulated_depth
         return image
@@ -782,9 +799,12 @@ class WaveFieldRenderer(nn.Module):
         visible &= (means_2d[:, 1] + radii > 0) & (means_2d[:, 1] - radii < H)
 
         if visible.sum() == 0:
-            img = background.view(3, 1, 1).expand(3, H, W)
+            # Return background but maintain gradient connection to inputs
+            # Add a zero-weighted sum of inputs to preserve gradient flow for backprop
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            img = background.view(3, 1, 1).expand(3, H, W) + grad_anchor
             if return_depth:
-                return img, torch.zeros(H, W, device=device)
+                return img, torch.zeros(H, W, device=device) + grad_anchor
             return img
 
         means_2d = means_2d[visible]
@@ -885,6 +905,12 @@ class WaveFieldRenderer(nn.Module):
         # Transpose to (3, H, W)
         image = rendered.permute(2, 0, 1)
         image = torch.clamp(image, 0, 1)
+
+        # Ensure gradient connection
+        if not image.requires_grad:
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            image = image + grad_anchor
+            accumulated_depth = accumulated_depth + grad_anchor
 
         if return_depth:
             # Normalize depth by total weight
@@ -994,6 +1020,12 @@ class SimplifiedRenderer(nn.Module):
                 torch.minimum(depth_map[y0:y1, x0:x1], d.expand(y1-y0, x1-x0)),
                 depth_map[y0:y1, x0:x1]
             )
+
+        # Ensure gradient connection
+        if not image.requires_grad:
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            image = image + grad_anchor
+            depth_map = depth_map + grad_anchor
 
         if return_depth:
             depth_map = torch.where(depth_map == float('inf'), torch.zeros_like(depth_map), depth_map)
