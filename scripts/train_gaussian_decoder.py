@@ -39,7 +39,11 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision import transforms
 import numpy as np
+import json
 from PIL import Image
+import matplotlib
+matplotlib.use('Agg')  # Non-interactive backend for servers
+import matplotlib.pyplot as plt
 
 # Perceptual losses
 try:
@@ -609,6 +613,88 @@ def save_checkpoint(
     print(f"Saved checkpoint to {path}")
 
 
+def save_training_history(history: Dict[str, List[float]], output_dir: str, experiment: int):
+    """Save training history to JSON file."""
+    path = Path(output_dir) / f"training_history_exp{experiment}.json"
+    with open(path, 'w') as f:
+        json.dump(history, f, indent=2)
+    print(f"Saved training history to {path}")
+
+
+def plot_training_metrics(history: Dict[str, List[float]], output_dir: str, experiment: int):
+    """Generate and save training metrics plots."""
+    if not history.get('total'):
+        print("No training history to plot")
+        return
+
+    epochs = list(range(1, len(history['total']) + 1))
+
+    # Create figure with subplots
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig.suptitle(f'Training Metrics - Experiment {experiment}', fontsize=14)
+
+    # Plot 1: Total Loss
+    ax = axes[0, 0]
+    ax.plot(epochs, history['total'], 'b-', linewidth=2, label='Total Loss')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.set_title('Total Loss')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    # Plot 2: RGB Loss
+    ax = axes[0, 1]
+    ax.plot(epochs, history['rgb'], 'g-', linewidth=2, label='RGB (L1)')
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Loss')
+    ax.set_title('RGB Reconstruction Loss')
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    # Plot 3: Perceptual Losses (SSIM + LPIPS)
+    ax = axes[1, 0]
+    has_perceptual = False
+    if history.get('ssim') and any(v > 0 for v in history['ssim']):
+        ax.plot(epochs, history['ssim'], 'r-', linewidth=2, label='SSIM')
+        has_perceptual = True
+    if history.get('lpips') and any(v > 0 for v in history['lpips']):
+        ax.plot(epochs, history['lpips'], 'm-', linewidth=2, label='LPIPS')
+        has_perceptual = True
+    if has_perceptual:
+        ax.set_xlabel('Epoch')
+        ax.set_ylabel('Loss')
+        ax.set_title('Perceptual Losses')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+    else:
+        ax.text(0.5, 0.5, 'No perceptual losses recorded', ha='center', va='center', transform=ax.transAxes)
+        ax.set_title('Perceptual Losses (N/A)')
+
+    # Plot 4: All losses combined (normalized for comparison)
+    ax = axes[1, 1]
+    for key in ['total', 'rgb', 'ssim', 'lpips', 'depth', 'boundary']:
+        if history.get(key) and any(v > 0 for v in history[key]):
+            values = history[key]
+            # Normalize to [0, 1] for comparison
+            min_v, max_v = min(values), max(values)
+            if max_v > min_v:
+                normalized = [(v - min_v) / (max_v - min_v) for v in values]
+                ax.plot(epochs, normalized, linewidth=1.5, label=key, alpha=0.8)
+    ax.set_xlabel('Epoch')
+    ax.set_ylabel('Normalized Loss')
+    ax.set_title('All Losses (Normalized)')
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='upper right', fontsize=8)
+
+    plt.tight_layout()
+
+    # Save plot
+    plot_path = Path(output_dir) / f"training_metrics_exp{experiment}.png"
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"Saved training metrics plot to {plot_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Train Gaussian Decoder")
     parser.add_argument('--experiment', type=int, default=3, choices=[1, 2, 3],
@@ -866,6 +952,17 @@ def main():
 
     best_loss = float('inf')
 
+    # Training history for metrics visualization
+    training_history = {
+        'total': [],
+        'rgb': [],
+        'ssim': [],
+        'lpips': [],
+        'depth': [],
+        'boundary': [],
+        'residual': []
+    }
+
     for epoch in range(start_epoch, config.epochs):
         print(f"\nEpoch {epoch + 1}/{config.epochs}")
         start_time = time.time()
@@ -890,6 +987,14 @@ def main():
             best_loss = losses['total']
             save_checkpoint(model, optimizer, epoch + 1, losses, config)
             print(f"New best loss: {best_loss:.4f}")
+
+        # Record training history
+        for key in training_history:
+            training_history[key].append(losses.get(key, 0.0))
+
+    # Save training history and plot metrics
+    save_training_history(training_history, config.output_dir, config.experiment)
+    plot_training_metrics(training_history, config.output_dir, config.experiment)
 
     print("\n" + "=" * 60)
     print("Training complete!")
