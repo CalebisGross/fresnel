@@ -919,6 +919,424 @@ class WaveFieldRenderer(nn.Module):
         return image
 
 
+class AngularSpectrumPropagator(nn.Module):
+    """
+    Angular Spectrum Method (ASM) for wave propagation.
+
+    Propagates a 2D complex wave field by a distance z using FFT:
+        U(x, y, z) = F⁻¹{ F{U(x, y, 0)} × H(fₓ, fᵧ, z) }
+
+    Where H is the transfer function:
+        H(fₓ, fᵧ, z) = exp(i × 2π × z × √(1/λ² - fₓ² - fᵧ²))
+
+    More accurate than simple Fresnel for near-field propagation.
+    Based on: "Towards Real-Time Photorealistic 3D Holography" (Nature, 2021)
+    """
+
+    def __init__(
+        self,
+        height: int,
+        width: int,
+        pixel_pitch: float = 1.0 / 256.0,  # Pixel spacing in scene units
+        wavelength: float = 0.05,
+        band_limit: bool = True,  # Limit frequencies to avoid aliasing
+    ):
+        super().__init__()
+        self.height = height
+        self.width = width
+        self.pixel_pitch = pixel_pitch
+        self.wavelength = wavelength
+        self.band_limit = band_limit
+
+        # Precompute frequency coordinates
+        fx = torch.fft.fftfreq(width, d=pixel_pitch)
+        fy = torch.fft.fftfreq(height, d=pixel_pitch)
+        FX, FY = torch.meshgrid(fx, fy, indexing='xy')
+
+        self.register_buffer('FX', FX)
+        self.register_buffer('FY', FY)
+
+    def _compute_transfer_function(
+        self,
+        z_distance: torch.Tensor,
+        wavelength: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Compute ASM transfer function for propagation by z_distance.
+
+        Args:
+            z_distance: Propagation distance (can be negative)
+            wavelength: Optional wavelength override (for per-channel)
+
+        Returns:
+            H: (H, W) complex transfer function
+        """
+        device = z_distance.device
+        FX = self.FX.to(device)
+        FY = self.FY.to(device)
+
+        wl = wavelength if wavelength is not None else self.wavelength
+        if isinstance(wl, (int, float)):
+            wl = torch.tensor(wl, device=device)
+
+        # kz² = (1/λ)² - fx² - fy²
+        kz_sq = (1.0 / wl) ** 2 - FX ** 2 - FY ** 2
+
+        # Band limiting: zero out evanescent waves (kz² < 0)
+        if self.band_limit:
+            kz_sq = torch.clamp(kz_sq, min=0)
+
+        kz = torch.sqrt(kz_sq)
+
+        # Transfer function: H = exp(i × 2π × z × kz)
+        H = torch.exp(1j * 2 * torch.pi * z_distance * kz)
+
+        return H
+
+    def propagate(
+        self,
+        field: torch.Tensor,
+        z_distance: torch.Tensor,
+        wavelength: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Propagate complex field by z_distance using ASM.
+
+        Args:
+            field: (H, W) or (H, W, C) complex field (torch.cfloat)
+            z_distance: Propagation distance
+            wavelength: Optional per-channel wavelength
+
+        Returns:
+            propagated: Same shape as input, propagated field
+        """
+        # Handle single-channel or multi-channel
+        if field.dim() == 2:
+            field = field.unsqueeze(-1)
+            squeeze_out = True
+        else:
+            squeeze_out = False
+
+        H, W, C = field.shape
+        device = field.device
+
+        # Propagate each channel
+        propagated_channels = []
+        for c in range(C):
+            channel_field = field[..., c]  # (H, W)
+
+            # Get wavelength for this channel
+            if wavelength is not None and wavelength.dim() > 0:
+                wl = wavelength[c] if len(wavelength) > c else wavelength
+            else:
+                wl = wavelength
+
+            # Compute transfer function
+            H_tf = self._compute_transfer_function(z_distance, wl)
+
+            # FFT propagation
+            field_fft = torch.fft.fft2(channel_field)
+            propagated_fft = field_fft * H_tf
+            propagated = torch.fft.ifft2(propagated_fft)
+
+            propagated_channels.append(propagated)
+
+        result = torch.stack(propagated_channels, dim=-1)
+
+        if squeeze_out:
+            result = result.squeeze(-1)
+
+        return result
+
+    def forward(
+        self,
+        field: torch.Tensor,
+        z_distance: torch.Tensor,
+        wavelength: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Alias for propagate()."""
+        return self.propagate(field, z_distance, wavelength)
+
+
+class ASMWaveFieldRenderer(nn.Module):
+    """
+    Wave field renderer using Angular Spectrum Method for propagation.
+
+    Unlike WaveFieldRenderer which accumulates complex amplitudes directly,
+    this renderer:
+    1. Places Gaussians at discrete depth planes
+    2. Uses ASM to propagate each plane to the focal plane
+    3. Sums the propagated fields for true interference
+
+    More physically accurate for holographic rendering.
+    Based on: "Towards Real-Time Photorealistic 3D Holography" (Nature, 2021)
+    """
+
+    def __init__(
+        self,
+        image_width: int,
+        image_height: int,
+        background: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        max_radius: int = 64,
+        num_depth_planes: int = 16,  # Number of discrete depth layers
+        depth_range: Tuple[float, float] = (0.1, 2.0),  # Near to far depth
+        focal_depth: float = 0.5,  # Focal plane for ASM propagation
+        pixel_pitch: float = 1.0 / 256.0,
+        wavelength: float = 0.05,
+    ):
+        super().__init__()
+        self.width = image_width
+        self.height = image_height
+        self.max_radius = max_radius
+        self.num_depth_planes = num_depth_planes
+        self.depth_range = depth_range
+        self.focal_depth = focal_depth
+        self.wavelength = wavelength
+
+        self.register_buffer('background', torch.tensor(background))
+
+        # Create depth planes
+        depths = torch.linspace(depth_range[0], depth_range[1], num_depth_planes)
+        self.register_buffer('depth_planes', depths)
+
+        # Create ASM propagator
+        self.propagator = AngularSpectrumPropagator(
+            height=image_height,
+            width=image_width,
+            pixel_pitch=pixel_pitch,
+            wavelength=wavelength
+        )
+
+    def _compute_radius(self, cov_2d: torch.Tensor) -> torch.Tensor:
+        """Compute effective radius from 2D covariance (3σ rule)."""
+        a = cov_2d[:, 0, 0]
+        b = cov_2d[:, 0, 1]
+        c = cov_2d[:, 1, 0]
+        d = cov_2d[:, 1, 1]
+
+        trace = a + d
+        det = a * d - b * c
+        det = torch.clamp(det, min=1e-6)
+
+        discriminant = torch.clamp(trace * trace - 4 * det, min=0)
+        max_eigenvalue = (trace + torch.sqrt(discriminant)) / 2
+
+        radii = 3.0 * torch.sqrt(torch.clamp(max_eigenvalue, min=1e-6))
+        radii = torch.clamp(radii, max=self.max_radius)
+
+        return radii
+
+    def _assign_to_depth_plane(self, depths: torch.Tensor) -> torch.Tensor:
+        """
+        Assign each Gaussian to nearest depth plane.
+
+        Args:
+            depths: (N,) depth values
+
+        Returns:
+            plane_indices: (N,) index of nearest depth plane
+        """
+        # Compute distance to each plane
+        distances = (depths.unsqueeze(1) - self.depth_planes.unsqueeze(0)).abs()
+        return distances.argmin(dim=1)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        scales: torch.Tensor,
+        rotations: torch.Tensor,
+        colors: torch.Tensor,
+        opacities: torch.Tensor,
+        camera: Camera,
+        return_depth: bool = False,
+        phases: Optional[torch.Tensor] = None,
+        wavelengths_rgb: Optional[torch.Tensor] = None,  # (3,) per-channel wavelengths
+    ) -> torch.Tensor:
+        """
+        Render using Angular Spectrum Method wave propagation.
+
+        Pipeline:
+        1. Project Gaussians to 2D, compute depth
+        2. Assign each Gaussian to a depth plane
+        3. Render Gaussians at each depth plane into complex field
+        4. Propagate each plane to focal depth using ASM
+        5. Sum propagated fields (interference)
+        6. Convert to intensity
+
+        Args:
+            positions: (N, 3) Gaussian centers
+            scales: (N, 3) scale along each axis
+            rotations: (N, 4) quaternions
+            colors: (N, 3) RGB colors [0, 1]
+            opacities: (N,) opacity values [0, 1]
+            camera: Camera parameters
+            return_depth: If True, also return depth map
+            phases: (N,) phase values in radians
+            wavelengths_rgb: (3,) wavelengths for R, G, B channels
+
+        Returns:
+            image: (3, H, W) rendered RGB image
+        """
+        if phases is None:
+            raise ValueError("ASMWaveFieldRenderer requires phases tensor.")
+
+        N = positions.shape[0]
+        device = positions.device
+        H, W = self.height, self.width
+
+        background = self.background.to(device)
+
+        # Project and get depths
+        cov_2d, means_2d, depths = compute_2d_covariance(
+            positions, scales, rotations, camera
+        )
+        radii = self._compute_radius(cov_2d)
+
+        # Filter visible
+        visible = (depths > camera.near) & (depths < camera.far)
+        visible &= (means_2d[:, 0] + radii > 0) & (means_2d[:, 0] - radii < W)
+        visible &= (means_2d[:, 1] + radii > 0) & (means_2d[:, 1] - radii < H)
+
+        if visible.sum() == 0:
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            img = background.view(3, 1, 1).expand(3, H, W) + grad_anchor
+            if return_depth:
+                return img, torch.zeros(H, W, device=device) + grad_anchor
+            return img
+
+        # Filter to visible
+        means_2d = means_2d[visible]
+        cov_2d = cov_2d[visible]
+        colors = colors[visible]
+        opacities = opacities[visible]
+        depths = depths[visible]
+        radii = radii[visible]
+        phases = phases[visible]
+
+        N_visible = means_2d.shape[0]
+
+        # Assign to depth planes
+        plane_indices = self._assign_to_depth_plane(depths)
+
+        # Compute inverse covariance
+        cov_reg = cov_2d + 1e-4 * torch.eye(2, device=device).unsqueeze(0)
+        cov_inv = torch.linalg.inv(cov_reg)
+
+        # Initialize per-plane complex fields (real + imag per channel)
+        plane_fields = torch.zeros(
+            self.num_depth_planes, H, W, 3, 2, device=device
+        )  # Last dim: [real, imag]
+
+        # Render Gaussians to their assigned depth planes
+        for i in range(N_visible):
+            mean = means_2d[i]
+            radius = radii[i].item()
+            inv_cov = cov_inv[i]
+            color = colors[i]
+            opacity = opacities[i]
+            phase = phases[i]
+            plane_idx = plane_indices[i]
+
+            # Bounding box
+            x0 = max(0, int(mean[0].item() - radius))
+            x1 = min(W, int(mean[0].item() + radius) + 1)
+            y0 = max(0, int(mean[1].item() - radius))
+            y1 = min(H, int(mean[1].item() + radius) + 1)
+
+            if x0 >= x1 or y0 >= y1:
+                continue
+
+            # Local coordinates
+            local_y, local_x = torch.meshgrid(
+                torch.arange(y0, y1, device=device, dtype=torch.float32),
+                torch.arange(x0, x1, device=device, dtype=torch.float32),
+                indexing='ij'
+            )
+
+            dx = local_x - mean[0]
+            dy = local_y - mean[1]
+
+            a, b = inv_cov[0, 0], inv_cov[0, 1]
+            c, d = inv_cov[1, 0], inv_cov[1, 1]
+            mahal = a * dx * dx + (b + c) * dx * dy + d * dy * dy
+
+            gauss_val = torch.exp(-0.5 * mahal)
+            amplitude = gauss_val * opacity
+
+            # Complex contribution
+            cos_phase = torch.cos(phase)
+            sin_phase = torch.sin(phase)
+
+            # Add to plane field
+            plane_fields[plane_idx, y0:y1, x0:x1, :, 0] += (
+                amplitude.unsqueeze(-1) * color.view(1, 1, 3) * cos_phase
+            )
+            plane_fields[plane_idx, y0:y1, x0:x1, :, 1] += (
+                amplitude.unsqueeze(-1) * color.view(1, 1, 3) * sin_phase
+            )
+
+        # Convert to complex tensors for propagation
+        # Sum propagated fields from each plane at focal depth
+        total_field = torch.zeros(H, W, 3, dtype=torch.cfloat, device=device)
+
+        focal_depth_tensor = torch.tensor(self.focal_depth, device=device)
+
+        for p in range(self.num_depth_planes):
+            plane_depth = self.depth_planes[p]
+            z_prop = focal_depth_tensor - plane_depth  # Propagation distance
+
+            # Convert to complex
+            field_complex = torch.complex(
+                plane_fields[p, :, :, :, 0],
+                plane_fields[p, :, :, :, 1]
+            )  # (H, W, 3)
+
+            # Skip empty planes
+            if field_complex.abs().max() < 1e-8:
+                continue
+
+            # Propagate each color channel
+            for c in range(3):
+                wl = wavelengths_rgb[c] if wavelengths_rgb is not None else self.wavelength
+                propagated = self.propagator.propagate(
+                    field_complex[..., c],
+                    z_prop,
+                    wavelength=wl
+                )
+                total_field[..., c] += propagated
+
+        # Convert to intensity: I = |U|²
+        intensity = (total_field.real ** 2 + total_field.imag ** 2)
+
+        # Square root for display (intensity → amplitude)
+        rendered = torch.sqrt(intensity + 1e-8)
+
+        # Normalize
+        max_val = rendered.max().clamp(min=1.0)
+        rendered = rendered / max_val
+        rendered = torch.clamp(rendered, 0, 1)
+
+        # Add background
+        total_amp = (total_field.abs().sum(dim=-1, keepdim=True)).clamp(0, 1)
+        rendered = rendered + background.view(1, 1, 3) * (1 - total_amp)
+
+        # Transpose to (3, H, W)
+        image = rendered.permute(2, 0, 1)
+        image = torch.clamp(image, 0, 1)
+
+        # Gradient connection
+        if not image.requires_grad:
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            image = image + grad_anchor
+
+        if return_depth:
+            # Simple depth from weighted sum
+            depth_map = torch.zeros(H, W, device=device)
+            return image, depth_map
+
+        return image
+
+
 class SimplifiedRenderer(nn.Module):
     """
     Simplified renderer for faster training.

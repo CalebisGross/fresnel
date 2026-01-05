@@ -155,6 +155,12 @@ class PhysicsConfig:
     # Diffraction-based placement
     use_diffraction_placement: bool = False  # Use FresnelDiffraction for Gaussian placement
 
+    # Physics-informed loss (from PINN research)
+    wave_equation_weight: float = 0.0     # Weight for Helmholtz equation constraint (∇²U + k²U = 0)
+
+    # Per-channel wavelength (RGB light physics)
+    use_multi_wavelength: bool = False    # Use MultiWavelengthPhysics for per-channel λ
+
     # Comparison mode
     compare_with_baseline: bool = False   # Render both physics and baseline, log comparison
 
@@ -332,6 +338,63 @@ def create_dummy_saag(batch_size: int, num_gaussians: int, device: torch.device)
     }
 
 
+def wave_equation_loss(
+    wave_field: torch.Tensor,
+    wavelength: float,
+    pixel_spacing: float = 1.0 / 256.0
+) -> torch.Tensor:
+    """
+    Physics-informed loss: Helmholtz equation constraint.
+
+    Penalizes solutions that violate the wave equation:
+        ∇²U + k²U = 0  (Helmholtz equation for monochromatic light)
+
+    where k = 2π/λ is the wave number.
+
+    This is based on Physics-Informed Neural Networks (PINNs) research:
+        - arXiv: "Physics-informed Neural Networks (PINNs) for Wave Propagation"
+        - arXiv: "Solving the wave equation with physics-informed deep learning"
+
+    The loss encourages the rendered wave field to satisfy the underlying
+    physics of wave propagation, potentially improving generalization.
+
+    Args:
+        wave_field: Rendered image or wave amplitude (B, C, H, W) or (B, H, W)
+        wavelength: Effective wavelength in normalized units
+        pixel_spacing: Physical spacing between pixels (default: 1/256)
+
+    Returns:
+        Scalar loss value (Helmholtz residual squared)
+    """
+    # Ensure 4D tensor
+    if wave_field.dim() == 3:
+        wave_field = wave_field.unsqueeze(1)
+
+    # Wave number: k = 2π / λ
+    k = 2 * torch.pi / wavelength
+
+    # Compute Laplacian via finite differences (5-point stencil)
+    # ∇²U ≈ (U[i+1,j] + U[i-1,j] + U[i,j+1] + U[i,j-1] - 4U[i,j]) / h²
+    #
+    # Using circular padding (roll) to avoid boundary issues
+    laplacian = (
+        torch.roll(wave_field, 1, dims=-1) +   # U[i, j+1]
+        torch.roll(wave_field, -1, dims=-1) +  # U[i, j-1]
+        torch.roll(wave_field, 1, dims=-2) +   # U[i+1, j]
+        torch.roll(wave_field, -1, dims=-2) -  # U[i-1, j]
+        4 * wave_field                          # -4U[i, j]
+    ) / (pixel_spacing ** 2)
+
+    # Helmholtz residual: ∇²U + k²U
+    # For valid wave solutions, this should be ~0
+    residual = laplacian + (k ** 2) * wave_field
+
+    # L2 loss on residual
+    loss = torch.mean(residual ** 2)
+
+    return loss
+
+
 def compute_losses(
     rendered: torch.Tensor,
     target: torch.Tensor,
@@ -340,7 +403,8 @@ def compute_losses(
     residuals: Optional[Dict[str, torch.Tensor]] = None,
     config: TrainingConfig = None,
     lpips_fn: Optional[nn.Module] = None,
-    vlm_density: Optional[torch.Tensor] = None
+    vlm_density: Optional[torch.Tensor] = None,
+    physics_config: Optional['PhysicsConfig'] = None
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Compute training losses.
@@ -404,9 +468,11 @@ def compute_losses(
 
     # Depth loss (if available)
     if rendered_depth is not None and target_depth is not None:
-        # Normalize depths for comparison
-        rd_norm = (rendered_depth - rendered_depth.mean()) / (rendered_depth.std() + 1e-6)
-        td_norm = (target_depth - target_depth.mean()) / (target_depth.std() + 1e-6)
+        # Normalize depths for comparison (use larger epsilon for numerical stability)
+        rd_std = torch.clamp(rendered_depth.std(), min=1e-4)
+        td_std = torch.clamp(target_depth.std(), min=1e-4)
+        rd_norm = (rendered_depth - rendered_depth.mean()) / rd_std
+        td_norm = (target_depth - target_depth.mean()) / td_std
         depth_loss = F.l1_loss(rd_norm, td_norm)
         loss_dict['depth'] = depth_loss.item()
         total_loss = total_loss + config.depth_weight * depth_loss
@@ -443,6 +509,17 @@ def compute_losses(
             total_loss = total_loss + config.boundary_weight * boundary_loss
         except ImportError:
             pass  # FresnelZones not available
+
+    # Physics-informed wave equation loss (Helmholtz constraint)
+    # From PINN research: ∇²U + k²U = 0 for valid wave solutions
+    if physics_config is not None and physics_config.wave_equation_weight > 0:
+        wave_loss = wave_equation_loss(
+            wave_field=rendered,
+            wavelength=physics_config.wavelength,
+            pixel_spacing=1.0 / config.image_size
+        )
+        loss_dict['wave_eq'] = wave_loss.item()
+        total_loss = total_loss + physics_config.wave_equation_weight * wave_loss
 
     loss_dict['total'] = total_loss.item()
 
@@ -566,8 +643,18 @@ def train_epoch(
             vlm_density
         )
 
+        # Check for NaN/Inf before backward pass
+        if torch.isnan(loss) or torch.isinf(loss):
+            print(f"  Warning: NaN/Inf loss at batch {batch_idx}, skipping")
+            optimizer.zero_grad()
+            continue
+
         # Backward pass
         loss.backward()
+
+        # Gradient clipping to prevent explosion
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
         optimizer.step()
 
         # Accumulate losses (skip non-numeric values like 'vlm_weighted' boolean)
@@ -756,6 +843,13 @@ def main():
     parser.add_argument('--focal_depth', type=float, default=0.5,
                         help='Focal plane depth for phase computation (default: 0.5)')
 
+    # Physics-informed loss (from PINN research)
+    parser.add_argument('--wave_equation_weight', type=float, default=0.0,
+                        help='Weight for Helmholtz wave equation constraint loss (default: 0.0, disabled)')
+    # Per-channel wavelength (RGB light physics)
+    parser.add_argument('--use_multi_wavelength', action='store_true',
+                        help='Use per-channel wavelength physics (λ_R:λ_G:λ_B ≈ 1.27:1.0:0.82)')
+
     args = parser.parse_args()
 
     # Create config
@@ -791,6 +885,8 @@ def main():
         num_zones=args.num_fresnel_zones,
         focal_depth=args.focal_depth,
         use_diffraction_placement=args.use_diffraction_placement,
+        wave_equation_weight=args.wave_equation_weight,
+        use_multi_wavelength=args.use_multi_wavelength,
     )
 
     print("=" * 60)

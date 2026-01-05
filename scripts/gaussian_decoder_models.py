@@ -58,9 +58,12 @@ def rotation_6d_to_quaternion(rot_6d: torch.Tensor) -> torch.Tensor:
     a1 = rot_6d[..., :3]
     a2 = rot_6d[..., 3:6]
 
-    # Gram-Schmidt orthogonalization
-    b1 = F.normalize(a1, dim=-1)
+    # Gram-Schmidt orthogonalization with numerical stability
+    # Add small epsilon to prevent division by zero in normalize
+    b1 = F.normalize(a1 + 1e-8, dim=-1)
     b2_raw = a2 - (b1 * a2).sum(dim=-1, keepdim=True) * b1
+    # Ensure b2_raw has non-zero norm before normalizing
+    b2_raw = b2_raw + 1e-8 * torch.randn_like(b2_raw).sign()
     b2 = F.normalize(b2_raw, dim=-1)
     b3 = torch.cross(b1, b2, dim=-1)
 
@@ -532,7 +535,9 @@ class DirectPatchDecoder(nn.Module):
         ], dim=-1)  # (B, 37, 37, K, 3)
 
         # Scale: ensure positive via softplus (increased range for larger Gaussians)
-        scales = F.softplus(raw_scale + 1.0) * 0.15  # (B, 37, 37, K, 3)
+        # Clamp input to prevent exp() overflow in softplus (exp(x) overflows for x > ~88)
+        raw_scale_clamped = torch.clamp(raw_scale, min=-10, max=20)
+        scales = F.softplus(raw_scale_clamped + 1.0) * 0.15  # (B, 37, 37, K, 3)
 
         # Rotation: 6D to quaternion
         rotations = rotation_6d_to_quaternion(rot_6d)  # (B, 37, 37, K, 4)
@@ -780,6 +785,274 @@ class PhysicsDirectPatchDecoder(nn.Module):
             'opacities': opacities,
             'phases': phases,  # Physics-derived!
         }
+
+
+# =============================================================================
+# Diffractive Layer (D²NN Inspired)
+# =============================================================================
+
+class DiffractiveLayer(nn.Module):
+    """
+    Learnable diffractive surface inspired by D²NN (Diffractive Deep Neural Networks).
+
+    From: "All-Optical Machine Learning Using Diffractive Deep Neural Networks"
+          Lin et al., Science 2018
+
+    Each spatial location has a trainable complex transmission coefficient:
+        t(x, y) = A(x, y) × exp(i × φ(x, y))
+
+    Where:
+        A: Amplitude modulation [0, 1]
+        φ: Phase modulation [0, 2π]
+
+    When applied to a wave field, the output is:
+        U_out = U_in × t
+
+    D²NN achieved 98% MNIST accuracy with just learnable diffraction.
+    This adds expressive power to our wave-based rendering.
+    """
+
+    def __init__(
+        self,
+        height: int,
+        width: int,
+        num_channels: int = 3,  # RGB
+        init_amplitude: float = 0.5,
+        init_phase_scale: float = 0.1,  # Small random init for stability
+    ):
+        """
+        Initialize DiffractiveLayer.
+
+        Args:
+            height: Spatial height of the diffractive surface
+            width: Spatial width of the diffractive surface
+            num_channels: Number of color channels (default 3 for RGB)
+            init_amplitude: Initial amplitude value (before sigmoid)
+            init_phase_scale: Scale for random phase initialization
+        """
+        super().__init__()
+
+        self.height = height
+        self.width = width
+        self.num_channels = num_channels
+
+        # Learnable amplitude modulation (raw, before sigmoid)
+        # Shape: (num_channels, height, width) for per-channel control
+        # or (1, height, width) for shared across channels
+        self.amplitude_raw = nn.Parameter(
+            torch.full((num_channels, height, width), init_amplitude)
+        )
+
+        # Learnable phase modulation
+        # Initialized with small random values for stability
+        self.phase = nn.Parameter(
+            torch.randn(num_channels, height, width) * init_phase_scale
+        )
+
+    def get_transmission(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get the amplitude and phase components of the transmission.
+
+        Returns:
+            amplitude: (C, H, W) in [0, 1]
+            phase: (C, H, W) in [0, 2π]
+        """
+        amplitude = torch.sigmoid(self.amplitude_raw)
+        # Wrap phase to [0, 2π]
+        phase_wrapped = self.phase % (2 * torch.pi)
+        return amplitude, phase_wrapped
+
+    def forward(
+        self,
+        wave_field: torch.Tensor,  # (H, W, C, 2) or (B, H, W, C, 2) - last dim is [real, imag]
+    ) -> torch.Tensor:
+        """
+        Apply diffractive modulation to incoming wave field.
+
+        Complex multiplication: U_out = U_in × t
+        Where t = A × exp(iφ) = A×cos(φ) + i×A×sin(φ)
+
+        Args:
+            wave_field: Complex wave field with shape (H, W, C, 2) or (B, H, W, C, 2)
+                        Last dimension is [real, imaginary]
+
+        Returns:
+            Modulated wave field with same shape as input
+        """
+        # Get transmission coefficients
+        amplitude, phase = self.get_transmission()
+
+        # Compute complex transmission: t = A × exp(iφ)
+        t_real = amplitude * torch.cos(phase)  # (C, H, W)
+        t_imag = amplitude * torch.sin(phase)  # (C, H, W)
+
+        # Reshape for broadcasting: (H, W, C)
+        t_real = t_real.permute(1, 2, 0)  # (H, W, C)
+        t_imag = t_imag.permute(1, 2, 0)  # (H, W, C)
+
+        # Handle batched input
+        has_batch = wave_field.dim() == 5
+        if has_batch:
+            t_real = t_real.unsqueeze(0)  # (1, H, W, C)
+            t_imag = t_imag.unsqueeze(0)  # (1, H, W, C)
+
+        # Extract real and imaginary parts of input
+        u_real = wave_field[..., 0]  # (..., H, W, C)
+        u_imag = wave_field[..., 1]  # (..., H, W, C)
+
+        # Complex multiplication: (a + bi)(c + di) = (ac - bd) + (ad + bc)i
+        out_real = u_real * t_real - u_imag * t_imag
+        out_imag = u_real * t_imag + u_imag * t_real
+
+        # Stack back to complex representation
+        return torch.stack([out_real, out_imag], dim=-1)
+
+    def forward_complex(
+        self,
+        wave_field: torch.Tensor,  # (H, W, C) or (B, H, W, C) complex tensor
+    ) -> torch.Tensor:
+        """
+        Apply diffractive modulation using native complex tensors.
+
+        Alternative interface for torch.cfloat tensors.
+
+        Args:
+            wave_field: Complex wave field (H, W, C) or (B, H, W, C)
+
+        Returns:
+            Modulated complex wave field
+        """
+        amplitude, phase = self.get_transmission()
+
+        # Build complex transmission coefficient
+        t_complex = amplitude * torch.exp(1j * phase)  # (C, H, W)
+        t_complex = t_complex.permute(1, 2, 0)  # (H, W, C)
+
+        # Handle batched input
+        if wave_field.dim() == 4:
+            t_complex = t_complex.unsqueeze(0)  # (1, H, W, C)
+
+        return wave_field * t_complex
+
+    def regularization_loss(self) -> torch.Tensor:
+        """
+        Compute regularization loss for the diffractive layer.
+
+        Encourages:
+        1. Smooth amplitude (total variation)
+        2. Smooth phase (total variation)
+        3. Moderate amplitude values (not too transparent or opaque)
+
+        Returns:
+            Scalar regularization loss
+        """
+        amplitude, phase = self.get_transmission()
+
+        # Total variation for smoothness
+        amp_tv = (
+            (amplitude[:, 1:, :] - amplitude[:, :-1, :]).abs().mean() +
+            (amplitude[:, :, 1:] - amplitude[:, :, :-1]).abs().mean()
+        )
+
+        phase_tv = (
+            (phase[:, 1:, :] - phase[:, :-1, :]).abs().mean() +
+            (phase[:, :, 1:] - phase[:, :, :-1]).abs().mean()
+        )
+
+        # Encourage amplitude near 0.5 (moderate transmission)
+        amp_center = ((amplitude - 0.5) ** 2).mean()
+
+        return 0.01 * amp_tv + 0.01 * phase_tv + 0.001 * amp_center
+
+
+class MultiscaleDiffractiveLayer(nn.Module):
+    """
+    Multi-scale diffractive layer with pyramid structure.
+
+    Applies diffractive modulation at multiple spatial scales,
+    allowing both coarse and fine control over wave propagation.
+    """
+
+    def __init__(
+        self,
+        height: int,
+        width: int,
+        num_channels: int = 3,
+        num_scales: int = 3,  # Number of pyramid levels
+    ):
+        super().__init__()
+
+        self.num_scales = num_scales
+
+        # Create diffractive layers at each scale
+        self.layers = nn.ModuleList()
+        for i in range(num_scales):
+            scale_h = height // (2 ** i)
+            scale_w = width // (2 ** i)
+            if scale_h < 4 or scale_w < 4:
+                break
+            self.layers.append(
+                DiffractiveLayer(scale_h, scale_w, num_channels)
+            )
+
+        self.actual_scales = len(self.layers)
+
+    def forward(
+        self,
+        wave_field: torch.Tensor,  # (H, W, C, 2) - last dim is [real, imag]
+    ) -> torch.Tensor:
+        """
+        Apply multi-scale diffractive modulation.
+
+        Upsamples coarse modulations to match input resolution.
+        """
+        H, W = wave_field.shape[:2]
+        C = wave_field.shape[2]
+        device = wave_field.device
+
+        # Accumulate modulated fields
+        result = wave_field.clone()
+
+        for i, layer in enumerate(self.layers):
+            # Get layer's native resolution
+            layer_h, layer_w = layer.height, layer.width
+
+            if i == 0:
+                # First layer: direct application at full resolution
+                result = layer(result)
+            else:
+                # Coarser layers: downsample, modulate, upsample
+                # Downsample wave field
+                result_down = F.interpolate(
+                    result.permute(2, 3, 0, 1),  # (C, 2, H, W)
+                    size=(layer_h, layer_w),
+                    mode='bilinear',
+                    align_corners=False
+                ).permute(2, 3, 0, 1)  # (h, w, C, 2)
+
+                # Apply modulation
+                result_down = layer(result_down)
+
+                # Upsample back
+                result_up = F.interpolate(
+                    result_down.permute(2, 3, 0, 1),  # (C, 2, h, w)
+                    size=(H, W),
+                    mode='bilinear',
+                    align_corners=False
+                ).permute(2, 3, 0, 1)  # (H, W, C, 2)
+
+                # Blend with existing result (residual connection)
+                weight = 1.0 / (i + 1)  # Decrease influence of coarser scales
+                result = result * (1 - weight) + result_up * weight
+
+        return result
+
+    def regularization_loss(self) -> torch.Tensor:
+        """Combined regularization from all scales."""
+        total = torch.tensor(0.0, device=self.layers[0].amplitude_raw.device)
+        for layer in self.layers:
+            total = total + layer.regularization_loss()
+        return total / len(self.layers)
 
 
 # =============================================================================

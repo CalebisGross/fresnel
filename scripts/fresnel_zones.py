@@ -614,6 +614,217 @@ class PhysicsFresnelZones(nn.Module):
         )
 
 
+class MultiWavelengthPhysics(nn.Module):
+    """
+    Per-channel wavelength physics for RGB light.
+
+    Real light has different wavelengths per color channel:
+        - Red:   ~700nm
+        - Green: ~550nm
+        - Blue:  ~450nm
+
+    Physical ratios: λ_R : λ_G : λ_B ≈ 1.27 : 1.0 : 0.82
+
+    This enables:
+        - Chromatic aberration effects (color fringing at edges)
+        - More realistic interference patterns per channel
+        - Wavelength-dependent diffraction behavior
+
+    Based on research from:
+        - Nature: "Towards real-time photorealistic 3D holography with deep neural networks"
+        - arXiv: "Complex-Valued Holographic Radiance Fields"
+    """
+
+    # Physical wavelength ratios (normalized to green)
+    WAVELENGTH_RATIO_R = 700.0 / 550.0  # ~1.27
+    WAVELENGTH_RATIO_G = 1.0
+    WAVELENGTH_RATIO_B = 450.0 / 550.0  # ~0.82
+
+    def __init__(
+        self,
+        base_wavelength: float = 0.05,
+        learnable: bool = True,
+        use_physical_ratios: bool = True,
+        wavelength_min: float = 0.01,
+        wavelength_max: float = 0.5,
+        focal_depth: float = 0.5,
+    ):
+        """
+        Initialize MultiWavelengthPhysics.
+
+        Args:
+            base_wavelength: Base wavelength (used for green channel)
+            learnable: If True, wavelengths are learnable parameters
+            use_physical_ratios: If True, initialize with physical RGB ratios
+            wavelength_min: Minimum allowed wavelength
+            wavelength_max: Maximum allowed wavelength
+            focal_depth: Focal plane depth for path difference computation
+        """
+        super().__init__()
+
+        self.wavelength_min = wavelength_min
+        self.wavelength_max = wavelength_max
+        self.focal_depth = focal_depth
+        self.learnable = learnable
+
+        # Initialize wavelengths with physical ratios if requested
+        if use_physical_ratios:
+            init_r = base_wavelength * self.WAVELENGTH_RATIO_R
+            init_g = base_wavelength * self.WAVELENGTH_RATIO_G
+            init_b = base_wavelength * self.WAVELENGTH_RATIO_B
+        else:
+            init_r = init_g = init_b = base_wavelength
+
+        if learnable:
+            self._wavelength_r_raw = nn.Parameter(torch.tensor(init_r))
+            self._wavelength_g_raw = nn.Parameter(torch.tensor(init_g))
+            self._wavelength_b_raw = nn.Parameter(torch.tensor(init_b))
+        else:
+            self.register_buffer('_wavelength_r_raw', torch.tensor(init_r))
+            self.register_buffer('_wavelength_g_raw', torch.tensor(init_g))
+            self.register_buffer('_wavelength_b_raw', torch.tensor(init_b))
+
+    def _constrain_wavelength(self, wavelength_raw: torch.Tensor) -> torch.Tensor:
+        """Apply constraints to prevent wavelength divergence."""
+        return torch.clamp(
+            torch.abs(wavelength_raw),
+            self.wavelength_min,
+            self.wavelength_max
+        )
+
+    @property
+    def wavelength_r(self) -> torch.Tensor:
+        """Red channel wavelength (longest)."""
+        return self._constrain_wavelength(self._wavelength_r_raw)
+
+    @property
+    def wavelength_g(self) -> torch.Tensor:
+        """Green channel wavelength (reference)."""
+        return self._constrain_wavelength(self._wavelength_g_raw)
+
+    @property
+    def wavelength_b(self) -> torch.Tensor:
+        """Blue channel wavelength (shortest)."""
+        return self._constrain_wavelength(self._wavelength_b_raw)
+
+    @property
+    def wavelengths(self) -> torch.Tensor:
+        """All wavelengths as (3,) tensor [R, G, B]."""
+        return torch.stack([self.wavelength_r, self.wavelength_g, self.wavelength_b])
+
+    def compute_path_difference(self, depth: torch.Tensor) -> torch.Tensor:
+        """
+        Compute optical path difference from focal plane.
+
+        Args:
+            depth: Depth tensor of any shape
+
+        Returns:
+            Path difference tensor (same shape as input)
+        """
+        return torch.abs(depth - self.focal_depth)
+
+    def depth_to_phase_rgb(self, depth: torch.Tensor) -> torch.Tensor:
+        """
+        Compute per-channel phase based on wavelength.
+
+        φ_c = (2π / λ_c) × path_length
+
+        Different wavelengths produce different phase accumulation rates,
+        leading to chromatic aberration and wavelength-dependent interference.
+
+        Args:
+            depth: Depth tensor of shape (...) - any shape
+
+        Returns:
+            Phase tensor of shape (..., 3) with [R, G, B] phases
+        """
+        path_diff = self.compute_path_difference(depth)
+
+        # Phase for each channel: φ = (2π / λ) × d
+        phase_r = (2 * torch.pi / self.wavelength_r) * path_diff
+        phase_g = (2 * torch.pi / self.wavelength_g) * path_diff
+        phase_b = (2 * torch.pi / self.wavelength_b) * path_diff
+
+        # Stack to get (..., 3) tensor
+        phases = torch.stack([phase_r, phase_g, phase_b], dim=-1)
+
+        return phases
+
+    def depth_to_phase_single(self, depth: torch.Tensor, channel: str = 'g') -> torch.Tensor:
+        """
+        Compute phase for a single channel.
+
+        Args:
+            depth: Depth tensor
+            channel: 'r', 'g', or 'b'
+
+        Returns:
+            Phase tensor (same shape as depth)
+        """
+        path_diff = self.compute_path_difference(depth)
+
+        if channel.lower() == 'r':
+            wavelength = self.wavelength_r
+        elif channel.lower() == 'g':
+            wavelength = self.wavelength_g
+        elif channel.lower() == 'b':
+            wavelength = self.wavelength_b
+        else:
+            raise ValueError(f"Unknown channel: {channel}. Use 'r', 'g', or 'b'.")
+
+        return (2 * torch.pi / wavelength) * path_diff
+
+    def get_chromatic_dispersion(self) -> torch.Tensor:
+        """
+        Compute chromatic dispersion (wavelength spread).
+
+        Returns:
+            Dispersion value (λ_r - λ_b) / λ_g
+        """
+        return (self.wavelength_r - self.wavelength_b) / self.wavelength_g
+
+    def forward(
+        self,
+        depth: torch.Tensor,
+        return_all: bool = False
+    ) -> Union[torch.Tensor, dict]:
+        """
+        Compute per-channel phases.
+
+        Args:
+            depth: Input depth tensor
+            return_all: If True, return dict with additional info
+
+        Returns:
+            RGB phases tensor, or dict with phases and wavelength info
+        """
+        phases = self.depth_to_phase_rgb(depth)
+
+        if not return_all:
+            return phases
+
+        return {
+            'phases': phases,
+            'phase_r': phases[..., 0],
+            'phase_g': phases[..., 1],
+            'phase_b': phases[..., 2],
+            'wavelength_r': self.wavelength_r,
+            'wavelength_g': self.wavelength_g,
+            'wavelength_b': self.wavelength_b,
+            'wavelengths': self.wavelengths,
+            'chromatic_dispersion': self.get_chromatic_dispersion(),
+        }
+
+    def extra_repr(self) -> str:
+        return (
+            f"λ_r={self.wavelength_r.item():.4f}, "
+            f"λ_g={self.wavelength_g.item():.4f}, "
+            f"λ_b={self.wavelength_b.item():.4f}, "
+            f"learnable={self.learnable}"
+        )
+
+
 class FresnelDiffraction(nn.Module):
     """
     Physics-based Fresnel diffraction pattern computation.
