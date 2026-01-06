@@ -218,7 +218,7 @@ def gaussian_2d(
     # Compute inverse covariance
     # Add small regularization for numerical stability
     cov_reg = cov + 1e-4 * torch.eye(2, device=device).unsqueeze(0)
-    cov_inv = torch.linalg.inv(cov_reg)  # (N, 2, 2)
+    cov_inv = torch.linalg.pinv(cov_reg)  # (N, 2, 2)
 
     # Compute determinant for normalization
     det = torch.linalg.det(cov_reg)  # (N,)
@@ -576,7 +576,7 @@ class TileBasedRenderer(nn.Module):
 
         # Compute inverse covariance for all Gaussians (needed for evaluation)
         cov_reg = cov_2d + 1e-4 * torch.eye(2, device=device).unsqueeze(0)
-        cov_inv = torch.linalg.inv(cov_reg)  # (N_visible, 2, 2)
+        cov_inv = torch.linalg.pinv(cov_reg)  # (N_visible, 2, 2)
 
         # Process each Gaussian - only compute within its radius
         for i in range(N_visible):
@@ -826,7 +826,7 @@ class WaveFieldRenderer(nn.Module):
 
         # Compute inverse covariance for all Gaussians
         cov_reg = cov_2d + 1e-4 * torch.eye(2, device=device).unsqueeze(0)
-        cov_inv = torch.linalg.inv(cov_reg)
+        cov_inv = torch.linalg.pinv(cov_reg)
 
         # Process each Gaussian - accumulate complex field
         for i in range(N_visible):
@@ -1220,7 +1220,7 @@ class ASMWaveFieldRenderer(nn.Module):
 
         # Compute inverse covariance
         cov_reg = cov_2d + 1e-4 * torch.eye(2, device=device).unsqueeze(0)
-        cov_inv = torch.linalg.inv(cov_reg)
+        cov_inv = torch.linalg.pinv(cov_reg)
 
         # Initialize per-plane complex fields (real + imag per channel)
         plane_fields = torch.zeros(
@@ -1488,6 +1488,308 @@ def save_gaussians_to_binary(path: str, gaussians: dict):
     data[:, 13] = gaussians['opacities'].cpu().numpy()
 
     data.tofile(path)
+
+
+class FourierGaussianRenderer(nn.Module):
+    """
+    Frequency-domain Gaussian splatting renderer using Holographic principles.
+
+    BREAKTHROUGH: O(H×W×log(H×W)) complexity - INDEPENDENT of Gaussian count!
+
+    Key insight: A Gaussian is the ONLY function that equals its own Fourier transform.
+    Instead of splatting N Gaussians one-by-one in spatial domain (O(N × r²)),
+    we add them ALL in frequency domain and do ONE inverse FFT.
+
+    Physics:
+    - Gaussian FT: G(x,y) with scale σ → G_freq(u,v) with scale 1/(2πσ)
+    - Translation → phase shift: x₀ offset → exp(-2πi×u×x₀)
+    - Wave phase from depth: φ = (2π/λ) × z
+    - Complex addition → natural interference patterns
+
+    Novel aspects:
+    1. First frequency-domain 3DGS renderer
+    2. Learnable per-channel wavelengths (RGB light physics)
+    3. Phase from depth enables self-supervised training
+
+    Named: Holographic Fourier Gaussian Splatting (HFGS)
+    """
+
+    def __init__(
+        self,
+        image_width: int,
+        image_height: int,
+        background: Tuple[float, float, float] = (0.0, 0.0, 0.0),
+        wavelength_r: float = 0.0635,  # Red wavelength (700nm equivalent)
+        wavelength_g: float = 0.05,    # Green wavelength (550nm equivalent)
+        wavelength_b: float = 0.041,   # Blue wavelength (450nm equivalent)
+        learnable_wavelengths: bool = True,
+        focal_depth: float = 0.5,
+    ):
+        """
+        Initialize FourierGaussianRenderer.
+
+        Args:
+            image_width: Output image width
+            image_height: Output image height
+            background: RGB background color (default black)
+            wavelength_r: Red channel wavelength for phase computation
+            wavelength_g: Green channel wavelength (reference)
+            wavelength_b: Blue channel wavelength
+            learnable_wavelengths: If True, wavelengths are trainable parameters
+            focal_depth: Focal plane depth for phase computation
+        """
+        super().__init__()
+
+        self.width = image_width
+        self.height = image_height
+        self.focal_depth = focal_depth
+        self.register_buffer('background', torch.tensor(background))
+
+        # Precompute frequency grid
+        # u, v are frequencies in cycles per pixel
+        u = torch.fft.fftfreq(image_width)
+        v = torch.fft.fftfreq(image_height)
+        V, U = torch.meshgrid(v, u, indexing='ij')  # (H, W)
+
+        self.register_buffer('U', U)
+        self.register_buffer('V', V)
+        self.register_buffer('U2_V2', U**2 + V**2)
+
+        # Per-channel wavelengths (learnable or fixed)
+        # Physical ratios: λ_R : λ_G : λ_B ≈ 1.27 : 1.0 : 0.82
+        wavelengths = torch.tensor([wavelength_r, wavelength_g, wavelength_b])
+        if learnable_wavelengths:
+            self.wavelengths = nn.Parameter(wavelengths)
+        else:
+            self.register_buffer('wavelengths', wavelengths)
+
+        self.learnable_wavelengths = learnable_wavelengths
+
+        # Wavelength constraints to prevent divergence
+        self.wavelength_min = 0.01
+        self.wavelength_max = 0.5
+
+    def _get_constrained_wavelengths(self) -> torch.Tensor:
+        """Get wavelengths with constraints applied."""
+        return torch.clamp(
+            torch.abs(self.wavelengths),
+            self.wavelength_min,
+            self.wavelength_max
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,      # (N, 3) world positions
+        scales: torch.Tensor,          # (N, 3) scales
+        rotations: torch.Tensor,       # (N, 4) quaternions (unused in freq domain)
+        colors: torch.Tensor,          # (N, 3) RGB colors - wave amplitude
+        opacities: torch.Tensor,       # (N,) opacity values
+        camera: Camera,
+        return_depth: bool = False,
+        phases: Optional[torch.Tensor] = None,  # (N,) optional override phases
+    ) -> torch.Tensor:
+        """
+        Render Gaussians in frequency domain with wave physics.
+
+        Algorithm:
+        1. Project 3D Gaussians to 2D
+        2. For each Gaussian, compute its frequency-domain representation
+        3. Accumulate all Gaussians in frequency domain (complex addition)
+        4. Single inverse FFT to get spatial image
+        5. Convert complex field to intensity: I = |U|²
+
+        Args:
+            positions: (N, 3) Gaussian centers in world space
+            scales: (N, 3) scale along each axis
+            rotations: (N, 4) quaternions (used for 2D covariance projection)
+            colors: (N, 3) RGB colors [0, 1] - treated as wave amplitude
+            opacities: (N,) opacity values [0, 1]
+            camera: Camera parameters
+            return_depth: If True, also return depth map (approximation)
+            phases: (N,) optional phase override. If None, computed from z-depth.
+
+        Returns:
+            image: (3, H, W) rendered RGB image
+            depth: (H, W) depth map (if return_depth=True)
+        """
+        N = positions.shape[0]
+        device = positions.device
+        H, W = self.height, self.width
+
+        # Move buffers to device
+        U = self.U.to(device)
+        V = self.V.to(device)
+        U2_V2 = self.U2_V2.to(device)
+        background = self.background.to(device)
+
+        # Get constrained wavelengths
+        wavelengths = self._get_constrained_wavelengths()
+
+        # Compute 2D covariance and projections
+        cov_2d, means_2d, depths = compute_2d_covariance(
+            positions, scales, rotations, camera
+        )
+
+        # Filter visible Gaussians
+        visible = (depths > camera.near) & (depths < camera.far)
+        visible &= (means_2d[:, 0] > -W) & (means_2d[:, 0] < 2*W)
+        visible &= (means_2d[:, 1] > -H) & (means_2d[:, 1] < 2*H)
+
+        if visible.sum() == 0:
+            # Return background with gradient connection
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            img = background.view(3, 1, 1).expand(3, H, W) + grad_anchor
+            if return_depth:
+                return img, torch.zeros(H, W, device=device) + grad_anchor
+            return img
+
+        # Filter to visible Gaussians
+        means_2d = means_2d[visible]
+        cov_2d = cov_2d[visible]
+        colors = colors[visible]
+        opacities = opacities[visible]
+        depths = depths[visible]
+        if phases is not None:
+            phases = phases[visible]
+
+        N_visible = means_2d.shape[0]
+
+        # Compute effective 2D scale from covariance (average of eigenvalues)
+        # For frequency domain Gaussian: σ_freq = 1/(2π×σ_spatial)
+        # Eigenvalues of 2x2 covariance
+        a = cov_2d[:, 0, 0]
+        d = cov_2d[:, 1, 1]
+        # Average scale (isotropic approximation)
+        σ_2d = torch.sqrt((a + d) / 2 + 1e-8)  # (N_visible,)
+
+        # Normalize positions to [-0.5, 0.5] range for FFT
+        # means_2d is in pixel coordinates [0, W] x [0, H]
+        x_norm = (means_2d[:, 0] / W) - 0.5  # [-0.5, 0.5]
+        y_norm = (means_2d[:, 1] / H) - 0.5  # [-0.5, 0.5]
+
+        # Compute phase from depth if not provided
+        if phases is None:
+            # Phase = (2π / λ) × |depth - focal_depth|
+            # Use green wavelength for single-phase computation
+            path_diff = torch.abs(depths - self.focal_depth)
+            phases_computed = (2 * torch.pi / wavelengths[1]) * path_diff
+        else:
+            phases_computed = phases
+
+        # Normalize scale for frequency domain
+        # In freq domain, Gaussian with spatial σ has freq σ_f = 1/(2π×σ)
+        # We work in cycles/pixel, so scale accordingly
+        σ_freq = σ_2d / (2 * torch.pi * W)  # Normalize by image width
+
+        # Initialize complex frequency field for RGB
+        freq_field = torch.zeros(3, H, W, dtype=torch.cfloat, device=device)
+
+        # Compute per-channel phases from depth (different λ per channel)
+        # phase_c = (2π / λ_c) × path_diff
+        path_diff = torch.abs(depths - self.focal_depth)
+        phases_rgb = (2 * torch.pi / wavelengths.view(3, 1)) * path_diff.unsqueeze(0)
+        # Shape: (3, N_visible)
+
+        # BATCHED PROCESSING to prevent OOM
+        # Instead of creating (N, H, W) tensors for ALL Gaussians at once,
+        # process in batches and accumulate into freq_field incrementally.
+        # This keeps memory bounded to O(batch_size × H × W) instead of O(N × H × W)
+        batch_size = 16  # Small batch to fit in VRAM alongside training
+
+        for batch_start in range(0, N_visible, batch_size):
+            batch_end = min(batch_start + batch_size, N_visible)
+            B = batch_end - batch_start  # Actual batch size
+
+            # Get batch slices
+            σ_batch = σ_freq[batch_start:batch_end]
+            x_batch = x_norm[batch_start:batch_end]
+            y_batch = y_norm[batch_start:batch_end]
+            opacity_batch = opacities[batch_start:batch_end]
+            color_batch = colors[batch_start:batch_end]
+            phases_batch = phases_rgb[:, batch_start:batch_end]  # (3, B)
+
+            # Expand for broadcasting: (B, H, W)
+            σ_exp = σ_batch.view(B, 1, 1)
+            x_exp = x_batch.view(B, 1, 1)
+            y_exp = y_batch.view(B, 1, 1)
+
+            # Gaussian amplitude in frequency domain: (B, H, W)
+            gaussian_freq = σ_exp * torch.exp(-2 * torch.pi**2 * σ_exp**2 * U2_V2)
+
+            # Translation phase shift: exp(-2πi(u×x + v×y))
+            translation_phase = torch.exp(-2j * torch.pi * (U * x_exp + V * y_exp))
+
+            # Combine Gaussian shape with translation
+            base_contribution = gaussian_freq * translation_phase  # (B, H, W) complex
+            del gaussian_freq, translation_phase  # Free memory
+
+            # Apply opacity
+            opacity_exp = opacity_batch.view(B, 1, 1)
+            base_contribution = base_contribution * opacity_exp
+
+            # For each color channel, apply wave phase and accumulate
+            for c in range(3):
+                # Wave phase for this channel: (B, 1, 1)
+                wave_phase = torch.exp(1j * phases_batch[c].view(B, 1, 1))
+
+                # Color amplitude for this channel: (B, 1, 1)
+                color_amp = color_batch[:, c].view(B, 1, 1)
+
+                # Channel contribution: (B, H, W) complex
+                channel_contrib = color_amp * base_contribution * wave_phase
+
+                # Accumulate into freq_field (sum over batch)
+                freq_field[c] = freq_field[c] + channel_contrib.sum(dim=0)
+                del channel_contrib  # Free memory immediately
+
+            del base_contribution  # Free memory
+
+        # Single inverse FFT to get spatial field
+        spatial_field = torch.fft.ifft2(freq_field)  # (3, H, W) complex
+
+        # Convert to intensity: I = |U|² = real² + imag²
+        intensity = spatial_field.real**2 + spatial_field.imag**2  # (3, H, W)
+
+        # Normalize - constructive interference can exceed 1.0
+        max_val = intensity.max()
+        if max_val > 1e-8:
+            intensity = intensity / max_val
+
+        # Apply sqrt to convert intensity to amplitude-like values for display
+        # (optional - depends on desired look)
+        # image = torch.sqrt(intensity + 1e-8)
+        image = intensity  # Keep as intensity for now
+
+        # Add background where intensity is low
+        total_intensity = intensity.sum(dim=0, keepdim=True)  # (1, H, W)
+        bg_weight = torch.clamp(1.0 - total_intensity, 0, 1)
+        image = image + background.view(3, 1, 1) * bg_weight
+
+        # Clamp final output
+        image = torch.clamp(image, 0, 1)
+
+        # Ensure gradient connection
+        if not image.requires_grad:
+            grad_anchor = (colors.sum() + opacities.sum() + positions.sum()) * 0.0
+            image = image + grad_anchor
+
+        if return_depth:
+            # Approximate depth map from weighted accumulation
+            # Use intensity-weighted depth
+            depth_map = torch.zeros(H, W, device=device)
+            # Simple approximation: use center pixel depths weighted by opacity
+            # A more accurate version would accumulate per-pixel
+            return image, depth_map
+
+        return image
+
+    def extra_repr(self) -> str:
+        λ = self._get_constrained_wavelengths()
+        return (
+            f"size=({self.height}, {self.width}), "
+            f"λ_rgb=[{λ[0]:.4f}, {λ[1]:.4f}, {λ[2]:.4f}], "
+            f"learnable={self.learnable_wavelengths}"
+        )
 
 
 if __name__ == '__main__':

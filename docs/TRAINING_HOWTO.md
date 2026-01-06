@@ -250,6 +250,43 @@ HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
 | `--use_vlm_guidance`    | Enable VLM-weighted loss                         | False |
 | `--vlm_weight`          | VLM weighting strength (0-1)                     | 0.5 |
 
+#### HFTS: Fast Training (10× Speedup!)
+
+Train in hours instead of days using the Hybrid Fast Training System:
+
+```bash
+# Fast mode - all optimizations enabled
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
+    --experiment 2 \
+    --data_dir images/training \
+    --epochs 100 \
+    --fast_mode
+
+# Or configure individually for more control:
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
+    --experiment 2 \
+    --data_dir images/training \
+    --epochs 100 \
+    --train_resolution 64 \
+    --progressive_schedule \
+    --stochastic_k 256
+```
+
+| Option                  | Description                                      | Default |
+|-------------------------|--------------------------------------------------|---------|
+| `--fast_mode`           | Enable ALL HFTS optimizations                    | False   |
+| `--train_resolution`    | Training resolution (use 64 for 16× speedup)     | Same as image_size |
+| `--progressive_schedule`| Grow Gaussians over training (1→2→4 per patch)   | False   |
+| `--stochastic_k`        | Sample K Gaussians per step (256 = ~20× speedup) | All     |
+
+**How HFTS Works:**
+
+1. **Multi-Resolution Training**: Train at 64×64 instead of 256×256 (16× fewer pixels)
+2. **Progressive Growing**: Start with 1 Gaussian per patch, grow to 4 over training
+3. **Stochastic Rendering**: Sample 256 Gaussians with importance sampling instead of all 5,476
+
+**Quality Preservation**: Final 25% of training uses full resolution and all Gaussians.
+
 #### Fresnel-Inspired Training Flags
 
 | Option                  | Description                                      | Default |

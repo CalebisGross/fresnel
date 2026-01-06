@@ -59,13 +59,17 @@ def rotation_6d_to_quaternion(rot_6d: torch.Tensor) -> torch.Tensor:
     a2 = rot_6d[..., 3:6]
 
     # Gram-Schmidt orthogonalization with numerical stability
-    # Add small epsilon to prevent division by zero in normalize
-    b1 = F.normalize(a1 + 1e-8, dim=-1)
+    # Use explicit eps=1e-6 (default 1e-12 is too small)
+    b1 = F.normalize(a1, dim=-1, eps=1e-6)
     b2_raw = a2 - (b1 * a2).sum(dim=-1, keepdim=True) * b1
     # Ensure b2_raw has non-zero norm before normalizing
     b2_raw = b2_raw + 1e-8 * torch.randn_like(b2_raw).sign()
-    b2 = F.normalize(b2_raw, dim=-1)
+    b2 = F.normalize(b2_raw, dim=-1, eps=1e-6)
     b3 = torch.cross(b1, b2, dim=-1)
+    # Regularize degenerate cross products (when b1 || b2)
+    b3_norm = b3.norm(dim=-1, keepdim=True)
+    b3 = torch.where(b3_norm < 1e-6, torch.tensor([0., 0., 1.], device=b3.device), b3)
+    b3 = F.normalize(b3, dim=-1, eps=1e-6)
 
     # Build rotation matrix
     R = torch.stack([b1, b2, b3], dim=-1)  # (..., 3, 3)
@@ -124,8 +128,8 @@ def rotation_6d_to_quaternion(rot_6d: torch.Tensor) -> torch.Tensor:
 
     quat = torch.stack([qw, qx, qy, qz], dim=-1)
 
-    # Normalize
-    quat = F.normalize(quat, dim=-1)
+    # Normalize with explicit eps for numerical stability
+    quat = F.normalize(quat, dim=-1, eps=1e-6)
 
     return quat.reshape(*batch_shape, 4)
 
@@ -451,7 +455,8 @@ class DirectPatchDecoder(nn.Module):
         self,
         features: torch.Tensor,           # (B, 384, 37, 37) DINOv2 features
         depth: Optional[torch.Tensor] = None,  # (B, 1, H, W) depth map
-        image_size: Tuple[int, int] = (518, 518)
+        image_size: Tuple[int, int] = (518, 518),
+        num_gaussians: Optional[int] = None  # HFTS: Override gaussians_per_patch for progressive growing
     ) -> Dict[str, torch.Tensor]:
         """
         Predict Gaussians from features with optional Fresnel enhancements.
@@ -461,20 +466,29 @@ class DirectPatchDecoder(nn.Module):
         - Edge-aware scale/opacity modulation (like diffraction fringes)
         - Optional phase output for interference blending
 
+        HFTS Progressive Growing:
+        - Pass num_gaussians to use fewer Gaussians per patch during early training
+        - This provides significant speedup (1 Gaussian = 4× faster than 4 Gaussians)
+
         Returns:
             Dict with Gaussian parameters (and optionally 'phases', 'edge_strength')
         """
         B, C, H, W = features.shape  # (B, 384, 37, 37)
-        K = self.gaussians_per_patch
+        # HFTS: Use num_gaussians if provided, otherwise use full capacity
+        K = min(num_gaussians, self.gaussians_per_patch) if num_gaussians is not None else self.gaussians_per_patch
         device = features.device
         output_dim = self.output_per_gaussian
 
         # Flatten spatial dims for per-patch processing
         features_flat = features.permute(0, 2, 3, 1).reshape(B * H * W, C)  # (B*37*37, 384)
 
-        # Predict Gaussian params
-        outputs = self.mlp(features_flat)  # (B*37*37, K*output_dim)
-        outputs = outputs.reshape(B, H, W, K, output_dim)  # (B, 37, 37, K, output_dim)
+        # Predict Gaussian params (always predict full capacity, then slice)
+        outputs = self.mlp(features_flat)  # (B*37*37, full_K*output_dim)
+        outputs = outputs.reshape(B, H, W, self.gaussians_per_patch, output_dim)  # (B, 37, 37, full_K, output_dim)
+
+        # HFTS Progressive Growing: Only use first K Gaussians
+        if K < self.gaussians_per_patch:
+            outputs = outputs[..., :K, :]  # (B, 37, 37, K, output_dim)
 
         # Parse outputs
         raw_pos = outputs[..., 0:3]        # (B, 37, 37, K, 3)
@@ -538,6 +552,8 @@ class DirectPatchDecoder(nn.Module):
         # Clamp input to prevent exp() overflow in softplus (exp(x) overflows for x > ~88)
         raw_scale_clamped = torch.clamp(raw_scale, min=-10, max=20)
         scales = F.softplus(raw_scale_clamped + 1.0) * 0.15  # (B, 37, 37, K, 3)
+        # Clamp final scales to prevent extreme values causing covariance issues
+        scales = torch.clamp(scales, min=1e-6, max=2.0)
 
         # Rotation: 6D to quaternion
         rotations = rotation_6d_to_quaternion(rot_6d)  # (B, 37, 37, K, 4)
