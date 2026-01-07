@@ -1,0 +1,29 @@
+# Fresnel Cloud Training Dependencies
+# For AMD MI300X with ROCm
+#
+# Note: PyTorch with ROCm should already be installed in the base image
+# (rocm/pytorch:rocm6.0_ubuntu22.04_py3.10_pytorch_2.1.1)
+
+# Core ML (versions compatible with ROCm PyTorch)
+numpy>=1.24.0,<2.0
+pillow>=10.0.0
+scipy>=1.11.0
+tqdm>=4.66.0
+
+# Perceptual losses for training
+pytorch-msssim>=1.0.0
+lpips>=0.1.4
+
+# ONNX for model export (C++ inference integration)
+onnx>=1.14.0
+onnxruntime>=1.16.0
+
+# Visualization
+matplotlib>=3.7.0
+
+# HuggingFace (for downloading models/data if needed)
+transformers>=4.35.0
+datasets>=2.14.0
+
+# Optional: background removal (large dependency)
+# rembg[gpu]>=2.0.50
