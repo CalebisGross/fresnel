@@ -37,14 +37,14 @@ from PIL import Image
 import matplotlib.pyplot as plt
 
 # Paths
-SCRIPT_DIR = Path(__file__).parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 MODEL_PATH = PROJECT_ROOT / "models" / "tiny_depth.onnx"
 
 # Default test images
 DEFAULT_IMAGES = [
-    PROJECT_ROOT / "test_face.jpg",
-    PROJECT_ROOT / "test_complex.png",
+    PROJECT_ROOT / "images" / "test_face.jpg",
+    PROJECT_ROOT / "images" / "test_complex.png",
 ]
 
 

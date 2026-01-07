@@ -31,6 +31,10 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, List
 from dataclasses import dataclass
 
+# Add scripts directory to path for local imports
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -61,13 +65,13 @@ except ImportError:
     print("Warning: lpips not available, LPIPS loss disabled")
 
 # Local imports
-from gaussian_decoder_models import (
+from models.gaussian_decoder_models import (
     SAAGRefinementNet,
     DirectPatchDecoder,
     FeatureGuidedSAAG,
     count_parameters
 )
-from differentiable_renderer import (
+from models.differentiable_renderer import (
     DifferentiableGaussianRenderer,
     TileBasedRenderer,
     SimplifiedRenderer,
@@ -80,7 +84,7 @@ from differentiable_renderer import (
 
 # Physics-derived components (may not be available during incremental development)
 try:
-    from gaussian_decoder_models import PhysicsDirectPatchDecoder
+    from models.gaussian_decoder_models import PhysicsDirectPatchDecoder
     PHYSICS_DECODER_AVAILABLE = True
 except ImportError as e:
     PHYSICS_DECODER_AVAILABLE = False
@@ -828,7 +832,7 @@ def compute_losses(
     # Adds extra weight at depth zone boundaries (like Fresnel diffraction fringes)
     if config.use_fresnel_zones and config.boundary_weight > 0 and target_depth is not None:
         try:
-            from fresnel_zones import FresnelZones
+            from utils.fresnel_zones import FresnelZones
             fresnel = FresnelZones(
                 num_zones=config.num_fresnel_zones,
                 depth_range=(0.0, 1.0),

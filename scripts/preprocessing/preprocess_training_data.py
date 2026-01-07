@@ -27,8 +27,9 @@ from tqdm import tqdm
 import numpy as np
 from PIL import Image
 
-# Add script directory to path for imports
-SCRIPT_DIR = Path(__file__).parent
+# Add scripts directory to path for imports
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(SCRIPT_DIR))
 
 # Optional rembg for background removal
@@ -40,7 +41,7 @@ except ImportError:
 
 # Optional VLM guidance
 try:
-    from vlm_guidance import VLMGuidance
+    from utils.vlm_guidance import VLMGuidance
     VLM_AVAILABLE = True
 except ImportError:
     VLM_AVAILABLE = False
@@ -49,8 +50,8 @@ except ImportError:
 import onnxruntime as ort
 
 # Model paths
-DINOV2_MODEL = SCRIPT_DIR.parent / "models" / "dinov2_small.onnx"
-DEPTH_MODEL = SCRIPT_DIR.parent / "models" / "depth_anything_v2_small.onnx"
+DINOV2_MODEL = PROJECT_ROOT / "models" / "dinov2_small.onnx"
+DEPTH_MODEL = PROJECT_ROOT / "models" / "depth_anything_v2_small.onnx"
 
 # DINOv2 constants
 DINOV2_INPUT_SIZE = 518
@@ -151,8 +152,22 @@ def remove_background(image: Image.Image, session=None) -> Image.Image:
     return Image.fromarray((rgb * 255).astype(np.uint8))
 
 
-def preprocess_for_dinov2(image_path: str, image: Image.Image = None) -> np.ndarray:
-    """Load and preprocess image for DINOv2."""
+def preprocess_image(image_path: str = None, image: Image.Image = None) -> np.ndarray:
+    """
+    Load and preprocess image for DINOv2 or Depth Anything V2.
+
+    Both models use the same preprocessing:
+    - Resize to 518x518
+    - Normalize with ImageNet mean/std
+    - Convert to CHW format with batch dimension
+
+    Args:
+        image_path: Path to image file (used if image is None)
+        image: PIL Image (takes precedence over image_path)
+
+    Returns:
+        Preprocessed image array of shape (1, 3, 518, 518)
+    """
     if image is None:
         img = Image.open(image_path).convert('RGB')
         img = img.resize((DINOV2_INPUT_SIZE, DINOV2_INPUT_SIZE), Image.Resampling.BILINEAR)
@@ -169,22 +184,15 @@ def preprocess_for_dinov2(image_path: str, image: Image.Image = None) -> np.ndar
     return img_array
 
 
-def preprocess_for_depth(image_path: str, image: Image.Image = None) -> np.ndarray:
-    """Load and preprocess image for Depth Anything V2."""
-    if image is None:
-        img = Image.open(image_path).convert('RGB')
-        img = img.resize((DINOV2_INPUT_SIZE, DINOV2_INPUT_SIZE), Image.Resampling.BILINEAR)
-    else:
-        img = image.convert('RGB')
-        if img.size != (DINOV2_INPUT_SIZE, DINOV2_INPUT_SIZE):
-            img = img.resize((DINOV2_INPUT_SIZE, DINOV2_INPUT_SIZE), Image.Resampling.BILINEAR)
+# Backwards-compatible aliases
+def preprocess_for_dinov2(image_path: str = None, image: Image.Image = None) -> np.ndarray:
+    """Load and preprocess image for DINOv2. Alias for preprocess_image()."""
+    return preprocess_image(image_path, image)
 
-    img_array = np.array(img, dtype=np.float32) / 255.0
-    img_array = (img_array - IMAGENET_MEAN) / IMAGENET_STD
-    img_array = img_array.transpose(2, 0, 1)  # HWC -> CHW
-    img_array = np.expand_dims(img_array, axis=0)  # Add batch dim
 
-    return img_array
+def preprocess_for_depth(image_path: str = None, image: Image.Image = None) -> np.ndarray:
+    """Load and preprocess image for Depth Anything V2. Alias for preprocess_image()."""
+    return preprocess_image(image_path, image)
 
 
 def extract_dinov2_features(session: ort.InferenceSession, image_path: str, image: Image.Image = None) -> np.ndarray:
@@ -380,8 +388,21 @@ def preprocess_dataset(
 
             processed += 1
 
+        except (IOError, OSError) as e:
+            # File read/write errors
+            print(f"\nFile error processing {img_path}: {e}")
+            continue
+        except ValueError as e:
+            # Data format errors (corrupted image, etc.)
+            print(f"\nData error processing {img_path}: {e}")
+            continue
+        except RuntimeError as e:
+            # ONNX/model errors
+            print(f"\nModel error processing {img_path}: {e}")
+            continue
         except Exception as e:
-            print(f"\nError processing {img_path}: {e}")
+            # Unexpected errors - log with full info
+            print(f"\nUnexpected error processing {img_path}: {type(e).__name__}: {e}")
             continue
 
     print()

@@ -23,7 +23,8 @@ from PIL import Image
 
 # Model path (relative to script directory)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(SCRIPT_DIR, "..", "models", "dinov2_small.onnx")
+PROJECT_ROOT = os.path.join(SCRIPT_DIR, "..", "..")
+MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "dinov2_small.onnx")
 
 # DINOv2 uses ImageNet normalization
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)

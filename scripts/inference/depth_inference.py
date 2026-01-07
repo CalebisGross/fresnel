@@ -13,7 +13,9 @@ import onnxruntime as ort
 from PIL import Image
 import os
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "depth_anything_v2_small.onnx")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.join(SCRIPT_DIR, "..", "..")
+MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "depth_anything_v2_small.onnx")
 
 def preprocess_image(image_path, target_size=(518, 518)):
     """Load and preprocess image for Depth Anything V2."""

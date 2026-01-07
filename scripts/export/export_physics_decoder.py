@@ -23,10 +23,11 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 
-# Add scripts directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add scripts directory to path for local imports
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_DIR))
 
-from gaussian_decoder_models import PhysicsDirectPatchDecoder
+from models.gaussian_decoder_models import PhysicsDirectPatchDecoder
 
 
 def export_physics_decoder(

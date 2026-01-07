@@ -28,6 +28,31 @@ The goal is not to replicate TripoSR or InstantMesh - it's to discover what's po
 
 ---
 
+## Quick Start
+
+```bash
+# Clone and build
+git clone https://github.com/CalebisGross/fresnel.git
+cd fresnel
+./scripts/build.sh
+
+# Run the interactive viewer
+./build/fresnel_viewer
+
+# Or train a model (requires Python environment)
+source .venv/bin/activate
+python scripts/preprocessing/download_training_data.py --dataset lpff --count 500
+python scripts/preprocessing/preprocess_training_data.py --data_dir images/training
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/training/train_gaussian_decoder.py \
+    --experiment 2 --data_dir images/training --epochs 100 --fast_mode
+```
+
+For detailed training instructions, see [docs/TRAINING_HOWTO.md](docs/TRAINING_HOWTO.md).
+
+For cloud training on AMD MI300X GPUs, see [docs/cloud-training.md](docs/cloud-training.md).
+
+---
+
 ## Why "Fresnel"?
 
 This project is named after **Augustin-Jean Fresnel (1788-1827)**, the French physicist who revolutionized our understanding of light through wave optics. His work provides deep conceptual connections to our approach—and more than just a name, his principles directly inform our algorithms.
@@ -65,7 +90,7 @@ Our implementation includes physics-inspired enhancements:
 
 ```bash
 # Train with Fresnel-inspired enhancements
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --data_dir images/training \
     --use_fresnel_zones \
     --num_fresnel_zones 8 \
@@ -96,7 +121,7 @@ Beyond heuristic-inspired features, we implement actual wave optics physics base
 
 ```bash
 # Train with physics-grounded wave optics
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --data_dir images/training \
     --use_wave_rendering \
     --wave_equation_weight 0.01 \
@@ -133,7 +158,7 @@ Our most novel contribution: rendering Gaussians in the frequency domain instead
 
 ```bash
 # Train with HFGS (the full breakthrough)
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --data_dir images/training \
     --use_fourier_renderer \
     --use_phase_retrieval_loss \
@@ -141,7 +166,7 @@ python scripts/train_gaussian_decoder.py \
     --learnable_wavelengths
 
 # HFGS with existing physics rendering for comparison
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --data_dir images/training \
     --use_fourier_renderer \
     --use_wave_rendering \
@@ -192,13 +217,13 @@ Achieves H100-competitive training speed on consumer GPUs (RX 7800 XT, 16GB) thr
 
 ```bash
 # Fast mode - all optimizations enabled (10× speedup)
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --experiment 2 --epochs 100 \
     --data_dir images/training \
     --fast_mode
 
 # Or configure individually:
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --experiment 2 --epochs 100 \
     --data_dir images/training \
     --train_resolution 64 \
@@ -206,7 +231,7 @@ python scripts/train_gaussian_decoder.py \
     --stochastic_k 256
 
 # Combine with HFGS for best of both worlds:
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --experiment 2 --epochs 100 \
     --data_dir images/training \
     --fast_mode \
@@ -242,7 +267,33 @@ Create an efficient, high-quality, open-source tool that converts single images 
 
 ---
 
-## Testing Hardware
+## System Requirements
+
+### Minimum
+
+| Component | Requirement |
+|-----------|-------------|
+| GPU | AMD GPU with 8GB VRAM (ROCm compatible) |
+| CPU | Any modern x86_64 |
+| RAM | 16GB |
+| OS | Linux (Ubuntu 22.04+ recommended) |
+| ROCm | 6.0+ |
+
+### Recommended
+
+| Component | Spec |
+|-----------|------|
+| GPU | AMD RX 7800 XT or better (16GB+ VRAM) |
+| CPU | AMD Ryzen 5800X or better |
+| RAM | 32GB |
+
+### Cloud Training
+
+For faster training, use AMD Developer Cloud with MI300X GPUs (192GB HBM3):
+- See [docs/cloud-training.md](docs/cloud-training.md) for setup guide
+- $1.99/hr via DigitalOcean
+
+### Development Hardware
 
 | Component | Spec |
 |-----------|------|
@@ -308,23 +359,23 @@ A minimal encoder-decoder architecture (~2.1M parameters) with U-Net style skip 
 
 ```bash
 # Quick test with synthetic data (no download needed)
-python scripts/train_tiny_depth.py --dataset synthetic --epochs 10
+python scripts/training/train_tiny_depth.py --dataset synthetic --epochs 10
 
 # Train on NYU Depth V2 (downloads ~4GB)
-python scripts/train_tiny_depth.py --dataset nyu --epochs 50
+python scripts/training/train_tiny_depth.py --dataset nyu --epochs 50
 
 # Train on custom images with Depth Anything V2 pseudo-labels
-python scripts/train_tiny_depth.py --dataset folder --data_root ./my_images --epochs 50
+python scripts/training/train_tiny_depth.py --dataset folder --data_root ./my_images --epochs 50
 ```
 
 **Testing:**
 
 ```bash
 # Run inference on images
-python scripts/test_tiny_depth.py image.jpg
+python scripts/tests/test_tiny_depth.py image.jpg
 
 # Multiple images
-python scripts/test_tiny_depth.py image1.jpg image2.png image3.jpg
+python scripts/tests/test_tiny_depth.py image1.jpg image2.png image3.jpg
 ```
 
 ### Depth Scripts
@@ -368,13 +419,13 @@ The decoder predicts Gaussians for each DINOv2 patch (37x37 grid), trained with 
 
 ```bash
 # Download training data from HuggingFace (500 face images)
-python scripts/download_training_data.py --dataset lpff --count 500
+python scripts/preprocessing/download_training_data.py --dataset lpff --count 500
 
 # Train the decoder (overnight, ~8-12 hours)
 ./scripts/train_overnight.sh
 
 # Or run manually with custom settings
-HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/training/train_gaussian_decoder.py \
     --experiment 2 \
     --data_dir images/training \
     --epochs 1000 \
@@ -411,16 +462,16 @@ The trained ONNX model is automatically loaded by the viewer. Toggle "Use Learne
 
 ```bash
 # Extract DINOv2 features and depth maps
-python scripts/preprocess_training_data.py --data_dir images/training
+python scripts/preprocessing/preprocess_training_data.py --data_dir images/training
 
 # With background removal (recommended for cleaner training)
-python scripts/preprocess_training_data.py --data_dir images/training --remove_background
+python scripts/preprocessing/preprocess_training_data.py --data_dir images/training --remove_background
 
 # With VLM density maps for semantic-aware training (requires LM Studio)
-python scripts/preprocess_training_data.py --data_dir images/training --use_vlm
+python scripts/preprocessing/preprocess_training_data.py --data_dir images/training --use_vlm
 
 # Full pipeline: background removal + VLM guidance
-python scripts/preprocess_training_data.py --data_dir images/training --remove_background --use_vlm
+python scripts/preprocessing/preprocess_training_data.py --data_dir images/training --remove_background --use_vlm
 ```
 
 ### Training with VLM Guidance
@@ -429,13 +480,13 @@ VLM semantic guidance focuses training on important regions (faces, eyes, fine d
 
 ```bash
 # Train with VLM-weighted loss (requires precomputed VLM density maps)
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --data_dir images/training \
     --use_vlm_guidance \
     --vlm_weight 0.5
 
 # Adjust VLM weight (0=uniform, 1=full VLM weighting)
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --data_dir images/training \
     --use_vlm_guidance \
     --vlm_weight 0.3
@@ -477,16 +528,16 @@ Fresnel includes experimental VLM (Vision Language Model) guidance for semantic-
 
 ```bash
 # Basic density guidance
-python scripts/vlm_guidance.py image.png
+python scripts/utils/vlm_guidance.py image.png
 
 # With visualization output
-python scripts/vlm_guidance.py image.png --visualize --output vlm_output/
+python scripts/utils/vlm_guidance.py image.png --visualize --output vlm_output/
 
 # Smart mode (auto-detects faces, uses finer grid)
-python scripts/vlm_guidance.py image.png --smart --grid_size 8 -v
+python scripts/utils/vlm_guidance.py image.png --smart --grid_size 8 -v
 
 # With background removal (matches training preprocessing)
-python scripts/vlm_guidance.py image.png --remove_background --smart -v
+python scripts/utils/vlm_guidance.py image.png --remove_background --smart -v
 ```
 
 ### Requirements
@@ -511,23 +562,28 @@ python scripts/vlm_guidance.py image.png --remove_background --smart -v
 
 ```
 fresnel/
-├── src/
-│   ├── core/               # C++ core library
+├── src/                    # C++ core library
+│   ├── core/
 │   │   ├── vulkan/         # Vulkan backend
-│   │   ├── compute/        # Compute shaders
+│   │   ├── compute/        # Compute shaders (Kompute)
 │   │   ├── renderer/       # Gaussian splatting renderer
 │   │   └── inference/      # Model inference engine
-│   ├── models/             # Neural network implementations
-│   │   ├── encoder/        # Image feature extraction
-│   │   ├── depth/          # Depth estimation
-│   │   └── decoder/        # Gaussian prediction
-│   ├── export/             # Mesh export pipeline
-│   └── ui/                 # Dear ImGui interface
-├── shaders/                # GLSL compute/graphics shaders
-├── rust/                   # Rust CLI and bindings
-├── training/               # Python training scripts
-├── weights/                # Pre-trained model weights
-└── assets/                 # Test images, sample data
+│   ├── viewer/             # ImGui interactive viewer
+│   └── ...
+├── scripts/                # Python ML scripts
+│   ├── training/           # Training scripts (train_gaussian_decoder.py, etc.)
+│   ├── models/             # Model architectures (gaussian_decoder_models.py, etc.)
+│   ├── preprocessing/      # Data preprocessing (download, preprocess)
+│   ├── inference/          # ONNX inference scripts
+│   ├── export/             # Model export to ONNX
+│   ├── utils/              # Utilities (fresnel_zones.py, vlm_guidance.py)
+│   └── tests/              # Test scripts
+├── models/                 # ONNX model weights
+├── checkpoints/            # Training checkpoints
+├── cloud/                  # Cloud training scripts (AMD MI300X)
+├── docs/                   # Documentation
+├── images/                 # Test images and training data
+└── build/                  # CMake build output
 ```
 
 ---
@@ -552,11 +608,15 @@ fresnel/
 - [x] Integrate learned decoder with viewer
 - [x] Add perceptual losses (SSIM + LPIPS)
 
-### Phase 3: Quality & Optimization
-- [ ] Multi-view consistency losses
-- [x] Optimize for 16GB VRAM constraint (TileBasedRenderer)
+### Phase 3: Quality & Optimization ✅
+- [x] Optimize for 16GB VRAM constraint (TileBasedRenderer - 50x memory reduction)
 - [x] Background removal preprocessing (rembg/u2net)
 - [x] VLM semantic guidance (experimental)
+- [x] HFTS: Hybrid Fast Training System (10x speedup)
+- [x] HFGS: Holographic Fourier Gaussian Splatting (O(H×W×log) rendering)
+- [x] Physics-grounded wave optics (ASM, wave equation loss)
+- [x] Cloud training support (AMD MI300X via DigitalOcean)
+- [ ] Multi-view consistency losses
 - [ ] Quantization and model optimization
 - [ ] Benchmark against TripoSR/InstantMesh
 
@@ -630,6 +690,44 @@ Things we're exploring or might explore:
 - [KomputeProject/kompute](https://github.com/KomputeProject/kompute)
 - [DepthAnything/Depth-Anything-V2](https://github.com/DepthAnything/Depth-Anything-V2)
 - [MrNeRF/awesome-3D-gaussian-splatting](https://github.com/MrNeRF/awesome-3D-gaussian-splatting)
+
+---
+
+## Troubleshooting
+
+### GPU Not Detected
+
+For AMD RX 7000 series (RDNA 3), set the architecture override:
+
+```bash
+export HSA_OVERRIDE_GFX_VERSION=11.0.0
+```
+
+### Out of Memory
+
+Reduce batch size or image resolution:
+
+```bash
+python scripts/training/train_gaussian_decoder.py \
+    --batch_size 2 --image_size 128
+```
+
+Or use HFTS fast mode which trains at lower resolution:
+
+```bash
+python scripts/training/train_gaussian_decoder.py --fast_mode
+```
+
+### Training Crashes / Resume
+
+Resume from the last checkpoint:
+
+```bash
+python scripts/training/train_gaussian_decoder.py \
+    --resume checkpoints/exp2/decoder_exp2_lastcheckpoint.pt
+```
+
+For more troubleshooting, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
 ---
 

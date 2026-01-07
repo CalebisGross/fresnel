@@ -17,14 +17,18 @@ import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 
+# Add scripts directory to path for local imports
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
 # Local imports
-from gaussian_decoder_models import (
+from models.gaussian_decoder_models import (
     SAAGRefinementNet,
     DirectPatchDecoder,
     FeatureGuidedSAAG,
     count_parameters
 )
-from differentiable_renderer import (
+from models.differentiable_renderer import (
     DifferentiableGaussianRenderer,
     Camera
 )

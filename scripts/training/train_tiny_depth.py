@@ -35,11 +35,12 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-# Add script directory to path
-sys.path.insert(0, str(Path(__file__).parent))
+# Add scripts directory to path for local imports
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_DIR))
 
-from tiny_depth_model import create_model
-from depth_dataset import create_dataloader
+from models.tiny_depth_model import create_model
+from utils.depth_dataset import create_dataloader
 
 
 # ============================================================================

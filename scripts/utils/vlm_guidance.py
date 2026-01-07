@@ -44,10 +44,10 @@ except ImportError:
     TORCH_AVAILABLE = False
 
 # Import background removal from preprocessing script
-SCRIPT_DIR = Path(__file__).parent
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
 try:
     sys.path.insert(0, str(SCRIPT_DIR))
-    from preprocess_training_data import remove_background, REMBG_AVAILABLE
+    from preprocessing.preprocess_training_data import remove_background, REMBG_AVAILABLE
 except ImportError:
     REMBG_AVAILABLE = False
     remove_background = None

@@ -21,7 +21,8 @@ import onnxruntime as ort
 
 # Model path (relative to script directory)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(SCRIPT_DIR, "..", "checkpoints", "overnight_run", "exp2", "gaussian_decoder_exp2.onnx")
+PROJECT_ROOT = os.path.join(SCRIPT_DIR, "..", "..")
+MODEL_PATH = os.path.join(PROJECT_ROOT, "checkpoints", "overnight_run", "exp2", "gaussian_decoder_exp2.onnx")
 
 # Feature grid dimensions (from DINOv2)
 FEATURE_DIM = 384

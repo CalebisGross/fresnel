@@ -18,15 +18,22 @@ Named after Augustin-Jean Fresnel (1788-1827), whose wave optics theory
 inspires our approach to organizing and blending Gaussian primitives.
 """
 
+import sys
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import Optional, Tuple, Dict
 
+# Add scripts directory to path for local imports
+SCRIPT_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
 # Import Fresnel utilities
 try:
-    from fresnel_zones import FresnelZones, FresnelEdgeDetector, PhysicsFresnelZones
+    from utils.fresnel_zones import FresnelZones, FresnelEdgeDetector, PhysicsFresnelZones
     FRESNEL_AVAILABLE = True
     PHYSICS_FRESNEL_AVAILABLE = True
 except ImportError:
@@ -35,7 +42,7 @@ except ImportError:
 
 # FresnelDiffraction may not exist yet during incremental development
 try:
-    from fresnel_zones import FresnelDiffraction
+    from utils.fresnel_zones import FresnelDiffraction
     DIFFRACTION_AVAILABLE = True
 except ImportError:
     DIFFRACTION_AVAILABLE = False

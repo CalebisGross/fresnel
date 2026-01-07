@@ -255,7 +255,7 @@ bash cloud/train.sh custom 100 16 256  # Smaller batch
 Resume from checkpoint:
 
 ```bash
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --experiment 2 \
     --data_dir /home/user/fresnel/data/training \
     --resume /home/user/fresnel/checkpoints/exp2/decoder_exp2_lastcheckpoint.pt \
@@ -280,14 +280,14 @@ After initial experiments, upgrade to better features:
 
 ```bash
 # 1. Export larger DINOv2 model
-python scripts/export_dinov2_model.py --size base
+python scripts/export/export_dinov2_model.py --size base
 
 # 2. Update model architecture (feature_dim 384 → 768)
-# Edit scripts/gaussian_decoder_models.py
+# Edit scripts/models/gaussian_decoder_models.py
 
 # 3. Re-preprocess training data
 rm images/training/features/*_dinov2.bin
-python scripts/preprocess_training_data.py --data_dir images/training
+python scripts/preprocessing/preprocess_training_data.py --data_dir images/training
 ```
 
 ### Cloud Steps

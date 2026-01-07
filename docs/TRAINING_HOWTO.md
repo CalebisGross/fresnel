@@ -53,10 +53,10 @@ Before training, export the required models:
 
 ```bash
 # Export DINOv2 feature encoder
-python scripts/export_dinov2_model.py
+python scripts/export/export_dinov2_model.py
 
 # Export Depth Anything V2
-python scripts/export_depth_model.py
+python scripts/export/export_depth_model.py
 ```
 
 This creates:
@@ -71,13 +71,13 @@ The fastest way to train a Gaussian decoder:
 
 ```bash
 # 1. Download training images (500 face images from LPFF dataset)
-python scripts/download_training_data.py --dataset lpff --count 500
+python scripts/preprocessing/download_training_data.py --dataset lpff --count 500
 
 # 2. Preprocess: extract features and depth maps
-python scripts/preprocess_training_data.py --data_dir images/training
+python scripts/preprocessing/preprocess_training_data.py --data_dir images/training
 
 # 3. Train the decoder
-HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/training/train_gaussian_decoder.py \
     --experiment 2 \
     --data_dir images/training \
     --epochs 100
@@ -95,12 +95,12 @@ Download images from HuggingFace datasets:
 
 ```bash
 # Face datasets (recommended for initial experiments)
-python scripts/download_training_data.py --dataset lpff --count 500
-python scripts/download_training_data.py --dataset ffhq --count 1000
-python scripts/download_training_data.py --dataset celeba --count 2000
+python scripts/preprocessing/download_training_data.py --dataset lpff --count 500
+python scripts/preprocessing/download_training_data.py --dataset ffhq --count 1000
+python scripts/preprocessing/download_training_data.py --dataset celeba --count 2000
 
 # Custom directory
-python scripts/download_training_data.py --dataset lpff --count 500 --output_dir my_training_data/
+python scripts/preprocessing/download_training_data.py --dataset lpff --count 500 --output_dir my_training_data/
 ```
 
 | Dataset | Total Images | Best For                    |
@@ -119,7 +119,7 @@ Extract DINOv2 features and depth maps for each image:
 
 ```bash
 # Basic preprocessing
-python scripts/preprocess_training_data.py --data_dir images/training
+python scripts/preprocessing/preprocess_training_data.py --data_dir images/training
 ```
 
 **What it does:**
@@ -137,7 +137,7 @@ python scripts/preprocess_training_data.py --data_dir images/training
 Removes backgrounds using rembg/u2net for cleaner training:
 
 ```bash
-python scripts/preprocess_training_data.py \
+python scripts/preprocessing/preprocess_training_data.py \
     --data_dir images/training \
     --remove_background
 ```
@@ -156,7 +156,7 @@ Extract semantic density maps for loss weighting:
 
 ```bash
 # Requires LM Studio running with a VLM model
-python scripts/preprocess_training_data.py \
+python scripts/preprocessing/preprocess_training_data.py \
     --data_dir images/training \
     --use_vlm \
     --vlm_url http://localhost:1234/v1/chat/completions \
@@ -169,7 +169,7 @@ python scripts/preprocess_training_data.py \
 #### Full Pipeline
 
 ```bash
-python scripts/preprocess_training_data.py \
+python scripts/preprocessing/preprocess_training_data.py \
     --data_dir images/training \
     --remove_background \
     --use_vlm \
@@ -195,7 +195,7 @@ python scripts/preprocess_training_data.py \
 Train the DirectPatchDecoder (Experiment 2):
 
 ```bash
-HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/training/train_gaussian_decoder.py \
     --experiment 2 \
     --data_dir images/training \
     --epochs 100 \
@@ -219,7 +219,7 @@ HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
 Train with semantic-aware loss weighting:
 
 ```bash
-HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/training/train_gaussian_decoder.py \
     --experiment 2 \
     --data_dir images/training \
     --epochs 100 \
@@ -256,14 +256,14 @@ Train in hours instead of days using the Hybrid Fast Training System:
 
 ```bash
 # Fast mode - all optimizations enabled
-HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/training/train_gaussian_decoder.py \
     --experiment 2 \
     --data_dir images/training \
     --epochs 100 \
     --fast_mode
 
 # Or configure individually for more control:
-HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/train_gaussian_decoder.py \
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/training/train_gaussian_decoder.py \
     --experiment 2 \
     --data_dir images/training \
     --epochs 100 \
@@ -318,7 +318,7 @@ The C++ viewer automatically loads `models/gaussian_decoder.onnx`:
 #### Python Inference
 
 ```bash
-python scripts/decoder_inference.py \
+python scripts/inference/decoder_inference.py \
     path/to/features.bin \
     path/to/depth.bin \
     output_gaussians.bin
@@ -390,16 +390,16 @@ Before training, test that VLM guidance works:
 
 ```bash
 # Basic test
-python scripts/vlm_guidance.py test_image.jpg
+python scripts/utils/vlm_guidance.py test_image.jpg
 
 # With visualization
-python scripts/vlm_guidance.py test_image.jpg --visualize --output vlm_test/
+python scripts/utils/vlm_guidance.py test_image.jpg --visualize --output vlm_test/
 
 # Smart mode (auto-detects faces)
-python scripts/vlm_guidance.py test_image.jpg --smart --grid_size 8 -v
+python scripts/utils/vlm_guidance.py test_image.jpg --smart --grid_size 8 -v
 
 # With background removal (matches training preprocessing)
-python scripts/vlm_guidance.py test_image.jpg --remove_background --smart -v
+python scripts/utils/vlm_guidance.py test_image.jpg --remove_background --smart -v
 ```
 
 **Output files:**
@@ -422,7 +422,7 @@ Larger grids provide finer spatial control but VLMs struggle to output consisten
 For face images, VLM guidance uses specialized prompts to identify facial landmarks:
 
 ```bash
-python scripts/vlm_guidance.py face.jpg --smart -v
+python scripts/utils/vlm_guidance.py face.jpg --smart -v
 ```
 
 The `--smart` flag:
@@ -451,7 +451,7 @@ ls images/training/features/
 
 Reduce batch size or image size:
 ```bash
-python scripts/train_gaussian_decoder.py --batch_size 2 --image_size 128
+python scripts/training/train_gaussian_decoder.py --batch_size 2 --image_size 128
 ```
 
 The TileBasedRenderer is memory-efficient but very large batch sizes can still OOM.
@@ -460,8 +460,8 @@ The TileBasedRenderer is memory-efficient but very large batch sizes can still O
 
 Export the models first:
 ```bash
-python scripts/export_dinov2_model.py
-python scripts/export_depth_model.py
+python scripts/export/export_dinov2_model.py
+python scripts/export/export_depth_model.py
 ```
 
 #### "rembg not installed"
@@ -484,7 +484,7 @@ For RX 7800 XT and similar RDNA3 GPUs:
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
 
 # Then run training
-python scripts/train_gaussian_decoder.py ...
+python scripts/training/train_gaussian_decoder.py ...
 ```
 
 ### Performance Tips
@@ -505,10 +505,10 @@ During training, watch for:
 After training, test inference:
 ```bash
 # Preprocess a test image
-python scripts/preprocess_training_data.py --data_dir test_images/
+python scripts/preprocessing/preprocess_training_data.py --data_dir test_images/
 
 # Run inference
-python scripts/decoder_inference.py \
+python scripts/inference/decoder_inference.py \
     test_images/features/test_dinov2.bin \
     test_images/features/test_depth.bin \
     output.bin
@@ -525,18 +525,18 @@ Complete example from start to finish:
 export HSA_OVERRIDE_GFX_VERSION=11.0.0
 
 # 2. Download 500 training images
-python scripts/download_training_data.py --dataset lpff --count 500
+python scripts/preprocessing/download_training_data.py --dataset lpff --count 500
 
 # 3. Start LM Studio with Qwen2-VL (optional, for VLM guidance)
 
 # 4. Preprocess with background removal and VLM
-python scripts/preprocess_training_data.py \
+python scripts/preprocessing/preprocess_training_data.py \
     --data_dir images/training \
     --remove_background \
     --use_vlm
 
 # 5. Train for 200 epochs with VLM guidance
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --experiment 2 \
     --data_dir images/training \
     --epochs 200 \
@@ -546,7 +546,7 @@ python scripts/train_gaussian_decoder.py \
     --vlm_weight 0.5
 
 # Alternative: Train with Fresnel-inspired enhancements (without VLM)
-python scripts/train_gaussian_decoder.py \
+python scripts/training/train_gaussian_decoder.py \
     --experiment 2 \
     --data_dir images/training \
     --epochs 200 \
