@@ -194,6 +194,70 @@ python scripts/training/train_gaussian_decoder.py \
 
 This approach is named **Holographic Neural Gaussian Fields** - a new paradigm combining Gaussian splatting with holographic wave physics.
 
+### Fresnel v2: TRELLIS Distillation
+
+**BREAKTHROUGH: TRELLIS quality at 10× speed via knowledge distillation!**
+
+Fresnel v2 distills TRELLIS's diffusion-based 3D priors into fast direct predictors, achieving high-quality single-image-to-3D on consumer AMD GPUs.
+
+| Model | Time | Quality | Novel Views |
+|-------|------|---------|-------------|
+| TRELLIS | ~45s | High | Good |
+| Fresnel v1 | ~2s | Low | Poor |
+| **Fresnel v2** | **5-10s** | **Medium-High** | **Good** |
+
+**Current Status (January 2025):**
+- ✅ Phase 1 (Data Generation): COMPLETE - 1986 diverse samples
+- 🚧 Phase 2 (Training): IN PROGRESS
+
+**Training Data Sources:**
+- Cap3D ABO (500): Amazon Berkeley Objects - household items
+- Cap3D ShapeNet (500): CAD models - chairs, tables, vehicles
+- Cap3D Objaverse (500): Diverse 3D objects from web
+- LPFF (500): Large-pose face images
+
+**Architecture:**
+
+```
+TRELLIS (Teacher)                    Fresnel v2 (Student)
+=================                    ====================
+Image → Stage 1 Diffusion → Occupancy    Image → Structure Net → Occupancy
+      → Stage 2 Diffusion → SLat               → Direct Decoder → Gaussians
+      → Decoder → Gaussians
+```
+
+**Occupancy-Gated Gaussian Prediction:**
+
+- `DirectSLatDecoder` learns WHICH voxels should contain Gaussians via `OccupancyHead`
+- Reduces output from 128k blobby Gaussians to ~10-20k object-shaped Gaussians
+- Training uses BCE loss for occupancy + Chamfer loss for Gaussian matching
+- New metrics: `Occ Accuracy` (target >85%), `Occ Recall` (target >70%)
+
+**Gaussian Data Format:**
+- `gaussians.ply` - Standard 3DGS format (AUTHORITATIVE, used by dataset loader)
+- `gaussians.bin` - Legacy Fresnel binary format (deprecated)
+
+**Training Pipeline:**
+
+```bash
+# 1. Generate distillation data using TRELLIS as teacher
+./scripts/distillation/run_trellis_generation.sh images/training_diverse data/trellis_distillation_diverse 25 12
+
+# 2. Train direct decoder on TRELLIS outputs
+HSA_OVERRIDE_GFX_VERSION=11.0.0 python scripts/training/train_direct_decoder.py \
+    --data_dir data/trellis_distillation_diverse \
+    --output_dir checkpoints/fresnel_v2_diverse \
+    --epochs 100 --batch_size 4 --lr 1e-4
+```
+
+**Requires TRELLIS-AMD** installed as sibling directory:
+
+```bash
+cd ../TRELLIS-AMD && ./install_amd.sh
+```
+
+See [docs/TRAINING_HOWTO.md](docs/TRAINING_HOWTO.md#fresnel-v2-trellis-distillation) for full instructions.
+
 ### HFTS: Hybrid Fast Training System
 
 **10× SPEEDUP: Train in hours, not days!**
@@ -339,63 +403,6 @@ For faster training, use AMD Developer Cloud with MI300X GPUs (192GB HBM3):
 | Math | GLM |
 | Image I/O | stb_image |
 | ML Training | PyTorch + ROCm (when needed) |
-
----
-
-## Depth Estimation Training
-
-Fresnel includes a lightweight depth estimation training pipeline for learning and experimentation.
-
-### TinyDepthNet
-
-A minimal encoder-decoder architecture (~2.1M parameters) with U-Net style skip connections.
-
-| Variant | Parameters | Description |
-|---------|------------|-------------|
-| `tiny` | ~2.1M | Custom encoder-decoder |
-| `resnet18` | ~14M | Pretrained ResNet-18 backbone |
-
-**Training:**
-
-```bash
-# Quick test with synthetic data (no download needed)
-python scripts/training/train_tiny_depth.py --dataset synthetic --epochs 10
-
-# Train on NYU Depth V2 (downloads ~4GB)
-python scripts/training/train_tiny_depth.py --dataset nyu --epochs 50
-
-# Train on custom images with Depth Anything V2 pseudo-labels
-python scripts/training/train_tiny_depth.py --dataset folder --data_root ./my_images --epochs 50
-```
-
-**Testing:**
-
-```bash
-# Run inference on images
-python scripts/tests/test_tiny_depth.py image.jpg
-
-# Multiple images
-python scripts/tests/test_tiny_depth.py image1.jpg image2.png image3.jpg
-```
-
-### Depth Scripts
-
-| Script | Purpose |
-|--------|---------|
-| `train_tiny_depth.py` | Train TinyDepthNet model |
-| `test_tiny_depth.py` | Run inference and save visualizations |
-| `tiny_depth_model.py` | Model architecture definitions |
-| `depth_dataset.py` | Dataset loaders (synthetic, NYU, folder) |
-| `depth_inference.py` | Depth Anything V2 inference |
-| `generate_pseudo_labels.py` | Generate depth labels using DA V2 |
-| `export_depth_model.py` | Export Depth Anything V2 to ONNX |
-
-### Pre-trained Models
-
-| Model | Size | Location |
-|-------|------|----------|
-| Depth Anything V2 (small) | ~100 MB | `models/depth_anything_v2_small.onnx` |
-| TinyDepthNet | ~13 MB | `models/tiny_depth.onnx` |
 
 ---
 
@@ -571,8 +578,9 @@ fresnel/
 │   ├── viewer/             # ImGui interactive viewer
 │   └── ...
 ├── scripts/                # Python ML scripts
-│   ├── training/           # Training scripts (train_gaussian_decoder.py, etc.)
-│   ├── models/             # Model architectures (gaussian_decoder_models.py, etc.)
+│   ├── training/           # Training scripts (train_gaussian_decoder.py, train_direct_decoder.py)
+│   ├── models/             # Model architectures (gaussian_decoder_models.py, direct_slat_decoder.py)
+│   ├── distillation/       # TRELLIS distillation (generate_trellis_data.py, trellis_dataset.py)
 │   ├── preprocessing/      # Data preprocessing (download, preprocess)
 │   ├── inference/          # ONNX inference scripts
 │   ├── export/             # Model export to ONNX
@@ -582,6 +590,7 @@ fresnel/
 ├── checkpoints/            # Training checkpoints
 ├── cloud/                  # Cloud training scripts (AMD MI300X)
 ├── docs/                   # Documentation
+├── data/                   # Training data (trellis_distillation/, etc.)
 ├── images/                 # Test images and training data
 └── build/                  # CMake build output
 ```
@@ -620,13 +629,24 @@ fresnel/
 - [ ] Quantization and model optimization
 - [ ] Benchmark against TripoSR/InstantMesh
 
-### Phase 4: Export & Polish
+### Phase 4: Fresnel v2 - TRELLIS Distillation 🚧
+- [x] TRELLIS-AMD integration (sibling directory)
+- [x] Distillation data generation pipeline (generate_trellis_data.py)
+- [x] Auto-restart wrapper for memory management
+- [x] Direct decoder architecture (DirectSLatDecoder, ~15M params)
+- [x] Direct decoder training script
+- [ ] Train and validate direct decoder
+- [ ] Stage 1 consistency distillation (structure predictor)
+- [ ] End-to-end Fresnel v2 pipeline
+- [ ] GLB/mesh export from Gaussians
+
+### Phase 5: Export & Polish
 - [ ] Implement mesh extraction from Gaussians
 - [ ] Support export formats (.obj, .gltf, .ply)
 - [ ] Texture baking from Gaussians
 - [ ] UI polish and user experience
 
-### Phase 5: Innovation
+### Phase 6: Innovation
 - [ ] Explore novel decoder architectures
 - [ ] Multi-image support
 - [ ] Scene-level reconstruction

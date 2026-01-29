@@ -1,0 +1,23 @@
+{
+  "checkpoint": "checkpoints/hfgs_enabled/decoder_exp2_epoch5.pt",
+  "num_images": 10,
+  "frontal_ssim": 0.3868346199393272,
+  "frontal_ssim_std": 0.2930443073447137,
+  "view_0": 0.3868346199393272,
+  "view_0_std": 0.2930443073447137,
+  "view_45": 0.480029296875,
+  "view_45_std": 0.004112592126805774,
+  "view_90": 0.0,
+  "view_90_std": 0.0,
+  "view_135": 0.0,
+  "view_135_std": 0.0,
+  "view_180": 1.0,
+  "view_180_std": 0.0,
+  "view_225": 0.0,
+  "view_225_std": 0.0,
+  "view_270": 0.0,
+  "view_270_std": 0.0,
+  "view_315": 0.478082275390625,
+  "view_315_std": 0.008222115197582385,
+  "view_consistency": 0.3527054424413346
+}

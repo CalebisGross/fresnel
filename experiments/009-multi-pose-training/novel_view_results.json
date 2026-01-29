@@ -1,0 +1,23 @@
+{
+  "checkpoint": "checkpoints/exp009_multipose/decoder_exp2_epoch10.pt",
+  "num_images": 10,
+  "frontal_ssim": 0.2518064744770527,
+  "frontal_ssim_std": 0.13083058776750037,
+  "view_0": 0.2518064744770527,
+  "view_0_std": 0.13083058776750037,
+  "view_45": 0.491754150390625,
+  "view_45_std": 0.0027547688857858443,
+  "view_90": 0.0,
+  "view_90_std": 0.0,
+  "view_135": 0.0,
+  "view_135_std": 0.0,
+  "view_180": 0.31697998046875,
+  "view_180_std": 0.28201258404745166,
+  "view_225": 0.0,
+  "view_225_std": 0.0,
+  "view_270": 0.0,
+  "view_270_std": 0.0,
+  "view_315": 0.487994384765625,
+  "view_315_std": 0.0033420357008493336,
+  "view_consistency": 0.2292316826427323
+}

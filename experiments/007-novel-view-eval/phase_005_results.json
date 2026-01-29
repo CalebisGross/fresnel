@@ -1,0 +1,23 @@
+{
+  "checkpoint": "checkpoints/phase_weight_05/decoder_exp2_epoch5.pt",
+  "num_images": 10,
+  "frontal_ssim": 0.4767622113227844,
+  "frontal_ssim_std": 0.3083675892023655,
+  "view_0": 0.4767622113227844,
+  "view_0_std": 0.3083675892023655,
+  "view_45": 0.4530029296875,
+  "view_45_std": 0.0028474061539535433,
+  "view_90": 0.0,
+  "view_90_std": 0.0,
+  "view_135": 0.0,
+  "view_135_std": 0.0,
+  "view_180": 0.0,
+  "view_180_std": 0.0,
+  "view_225": 0.0,
+  "view_225_std": 0.0,
+  "view_270": 0.0,
+  "view_270_std": 0.0,
+  "view_315": 0.4623779296875,
+  "view_315_std": 0.003095655952358945,
+  "view_consistency": 0.2416675761147858
+}

@@ -1,4 +1,6 @@
-# Build outputs
+# ============================================================================
+# Build Outputs
+# ============================================================================
 build/
 target/
 bin/
@@ -7,76 +9,109 @@ lib/
 *.a
 *.so
 *.dylib
+compile_commands.json
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
+# ============================================================================
 # Python
+# ============================================================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
 .eggs/
 dist/
-venv/
 .venv/
+venv/
 env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.pyc
 
+# ============================================================================
 # Rust
+# ============================================================================
 Cargo.lock
 debug/
 *.rlib
 
-# Model weights (large files)
+# ============================================================================
+# IDE & Editors
+# ============================================================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ============================================================================
+# Model Weights & Checkpoints (large files)
+# ============================================================================
 weights/*.bin
 weights/*.onnx
 weights/*.pt
 weights/*.pth
 weights/*.safetensors
 !weights/.gitkeep
-checkpoints/
 
+checkpoints/
+models/*.onnx
+models/*.onnx.data
+
+# ============================================================================
+# Training Data & Outputs
+# ============================================================================
+images/
+cvs_training_synthetic/
+output/
+cloud_results/
+cvs_training_synthetic/
+cvs_test_output/
+data/
+decoder_test_10epochs/
+
+# ============================================================================
 # Assets (optional large files)
+# ============================================================================
 assets/*.png
 assets/*.jpg
 assets/*.jpeg
 !assets/.gitkeep
-images/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
+# ============================================================================
+# Logs & Temporary Files
+# ============================================================================
 *.log
 logs/
-
-# Temporary
 tmp/
 temp/
 *.tmp
 imgui.ini
 
-# Python virtual environment
-.venv/
-
-# Model weights (download separately)
-models/*.onnx
-!models/tiny_depth.onnx
-
-# Test artifacts
+# ============================================================================
+# Test Artifacts
+# ============================================================================
 *.ppm
 *.bin
 test_*.jpg
 output*.png
+output.ply
+test_output.png
+multi_view_comparison.png
+test_renders/
 
-# Model data files
-models/*.onnx.data
+# ============================================================================
+# VLM & Experimental Outputs
+# ============================================================================
 vlm_output/
 vlm_viz/
 
-CLAUDE.md
+# ============================================================================
+# Operating System
+# ============================================================================
+.DS_Store
+Thumbs.db
+
+# ============================================================================
+# Project-Specific
+# ============================================================================
