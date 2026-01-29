@@ -5,7 +5,7 @@ Generate Pseudo-Labels using Depth Anything V2.
 This script runs DA V2 (Small or Large) on a folder of images to generate
 depth map "pseudo-labels" that can be used for:
 
-1. Training TinyDepth on your own images (no need for labeled dataset!)
+1. Training depth models on your own images (no need for labeled dataset!)
 2. Knowledge distillation (train Small to match Large outputs)
 3. Creating training data from any image collection
 
@@ -201,9 +201,9 @@ def process_folder(
 
     # Print usage instructions
     print("\n" + "=" * 60)
-    print("To train TinyDepth on this data:")
+    print("To use this data for training:")
     print("=" * 60)
-    print(f"  python train_tiny_depth.py --dataset folder --data_root {output_dir}")
+    print(f"  Data available at: {output_dir}")
 
 
 def download_sample_images(output_dir: Path, num_images: int = 100):

@@ -1,6 +1,7 @@
 #include "viewer.hpp"
 #include <iostream>
 #include <cstring>
+#include <cctype>
 
 int main(int argc, char* argv[]) {
     std::cout << "=== Fresnel Viewer ===\n\n";
@@ -35,16 +36,33 @@ int main(int argc, char* argv[]) {
     }
 
     if (!image_path.empty()) {
-        // Load real image
-        std::cout << "Loading image: " << image_path << "\n";
-        if (!viewer.load_image(image_path)) {
-            std::cerr << "Failed to load image, falling back to test cloud\n";
+        // Detect file type by extension
+        std::string ext;
+        auto dot_pos = image_path.rfind('.');
+        if (dot_pos != std::string::npos) {
+            ext = image_path.substr(dot_pos);
+            for (auto& c : ext) c = std::tolower(c);
+        }
+
+        bool success = false;
+        if (ext == ".ply" || ext == ".bin") {
+            // Load pre-computed Gaussian file
+            std::cout << "Loading Gaussian file: " << image_path << "\n";
+            success = viewer.load_gaussian_file(image_path);
+        } else {
+            // Load as image file
+            std::cout << "Loading image: " << image_path << "\n";
+            success = viewer.load_image(image_path);
+        }
+
+        if (!success) {
+            std::cerr << "Failed to load file, falling back to test cloud\n";
             viewer.load_test_cloud(gaussian_count, 3.0f);
         }
     } else {
         // Load test cloud
-        std::cout << "Usage: fresnel_viewer [image_path] [gaussian_count]\n";
-        std::cout << "  image_path: Path to image file (JPG, PNG, etc.)\n";
+        std::cout << "Usage: fresnel_viewer [file_path] [gaussian_count]\n";
+        std::cout << "  file_path: Image file (JPG, PNG) or Gaussian file (.ply, .bin)\n";
         std::cout << "  gaussian_count: Number of test Gaussians (default: 1000)\n\n";
         std::cout << "Loading test cloud with " << gaussian_count << " Gaussians...\n";
         viewer.load_test_cloud(gaussian_count, 3.0f);

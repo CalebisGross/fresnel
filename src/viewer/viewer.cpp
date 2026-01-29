@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cctype>
 
 namespace fresnel {
 
@@ -166,6 +167,7 @@ void Viewer::load_gaussians(const GaussianCloud& cloud) {
     if (renderer_) {
         renderer_->upload_gaussians(cloud);
         stats_.gaussian_count = static_cast<int>(cloud.size());
+        full_quality_cloud_ = cloud;  // Store for PLY export
         needs_rerender_ = true;
     }
 }
@@ -248,6 +250,50 @@ bool Viewer::load_image(const std::string& path) {
     needs_rerender_ = true;
 
     std::cout << "Image loaded successfully!\n";
+    return true;
+}
+
+bool Viewer::load_gaussian_file(const std::string& path) {
+    // Detect file type by extension
+    std::string ext;
+    auto dot_pos = path.rfind('.');
+    if (dot_pos != std::string::npos) {
+        ext = path.substr(dot_pos);
+        // Convert to lowercase
+        for (auto& c : ext) c = std::tolower(c);
+    }
+
+    GaussianCloud cloud;
+    bool success = false;
+
+    if (ext == ".ply") {
+        std::cout << "Loading PLY file: " << path << "\n";
+        success = cloud.load_ply(path);
+    } else if (ext == ".bin") {
+        std::cout << "Loading binary file: " << path << "\n";
+        success = cloud.load_binary(path);
+    } else {
+        std::cerr << "Unknown file type: " << ext << "\n";
+        std::cerr << "Supported formats: .ply, .bin\n";
+        return false;
+    }
+
+    if (!success || cloud.empty()) {
+        std::cerr << "Failed to load Gaussian file: " << path << "\n";
+        return false;
+    }
+
+    // Load into renderer
+    load_gaussians(cloud);
+
+    // Reset camera for good initial view
+    camera_target_ = glm::vec3(0.0f);
+    camera_distance_ = 3.5f;
+    camera_yaw_ = 0.0f;
+    camera_pitch_ = 0.0f;
+    needs_rerender_ = true;
+
+    std::cout << "Loaded " << cloud.size() << " Gaussians from " << path << "\n";
     return true;
 }
 
@@ -508,6 +554,8 @@ void Viewer::process_input() {
                 mouse_dragging_ = true;
                 last_mouse_x_ = mouse_x;
                 last_mouse_y_ = mouse_y;
+                // Enable fast preview mode during drag (limit to 100k Gaussians)
+                if (renderer_) renderer_->set_max_render_gaussians(100000);
             } else {
                 double dx = mouse_x - last_mouse_x_;
                 double dy = mouse_y - last_mouse_y_;
@@ -522,8 +570,11 @@ void Viewer::process_input() {
                 last_mouse_y_ = mouse_y;
                 needs_rerender_ = true;
             }
-        } else {
+        } else if (mouse_dragging_ && glfwGetMouseButton(window_, GLFW_MOUSE_BUTTON_RIGHT) != GLFW_PRESS) {
+            // Drag ended - restore full quality rendering
             mouse_dragging_ = false;
+            if (renderer_) renderer_->set_max_render_gaussians(0);  // 0 = no limit
+            needs_rerender_ = true;  // Re-render at full quality
         }
 
         // Right mouse button: pan
@@ -532,6 +583,8 @@ void Viewer::process_input() {
                 mouse_dragging_ = true;
                 last_mouse_x_ = mouse_x;
                 last_mouse_y_ = mouse_y;
+                // Enable fast preview mode during drag (limit to 100k Gaussians)
+                if (renderer_) renderer_->set_max_render_gaussians(100000);
             } else {
                 double dx = mouse_x - last_mouse_x_;
                 double dy = mouse_y - last_mouse_y_;
@@ -1067,6 +1120,22 @@ void Viewer::render_ui() {
             }
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Export current view at full quality\nSupports .ppm format (convert with ImageMagick)");
+            }
+
+            ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x);
+            ImGui::InputText("##plypath", ply_export_path_, sizeof(ply_export_path_));
+            if (ImGui::Button("Export 3D Gaussians (.ply)", ImVec2(-1, 0))) {
+                if (ply_export_path_[0] != '\0' && !full_quality_cloud_.empty()) {
+                    if (full_quality_cloud_.save_ply(ply_export_path_)) {
+                        std::cout << "Exported " << full_quality_cloud_.size()
+                                  << " Gaussians to: " << ply_export_path_ << "\n";
+                    } else {
+                        std::cerr << "Failed to export PLY to: " << ply_export_path_ << "\n";
+                    }
+                }
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Export 3D Gaussians as PLY file\nCompatible with Blender, SuperSplat, MeshLab");
             }
         }
 

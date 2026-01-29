@@ -69,8 +69,11 @@ from models.gaussian_decoder_models import (
     SAAGRefinementNet,
     DirectPatchDecoder,
     FeatureGuidedSAAG,
-    count_parameters
+    FibonacciPatchDecoder,  # Nature-inspired spiral sampling
+    count_parameters,
+    tensegrity_loss,  # Structural integrity regularization
 )
+from models.nca_gaussian_decoder import NCAGaussianDecoder  # Exp 014: Neural Cellular Automata
 from models.differentiable_renderer import (
     DifferentiableGaussianRenderer,
     TileBasedRenderer,
@@ -103,6 +106,11 @@ class TrainingConfig:
     weight_decay: float = 1e-5
     image_size: int = 256  # Render at this size for training (speed)
     feature_size: int = 37  # DINOv2 patch grid size
+    feature_dim: int = 384  # DINOv2 feature dimension (384=small, 768=base, 1024=large)
+
+    # Depth fusion: concatenate encoded depth features with DINOv2 features
+    use_depth_fusion: bool = False  # Enable depth fusion in decoder
+    depth_feature_dim: int = 64  # Dimension of encoded depth features
 
     # Loss weights
     rgb_weight: float = 1.0
@@ -118,6 +126,16 @@ class TrainingConfig:
     gaussians_per_patch: int = 4  # For Exp 2 (increased for better coverage)
     max_images: int = None  # Limit training images (None = use all)
 
+    # Fibonacci decoder (Experiment 4) - Nature-inspired spiral sampling
+    n_spiral_points: int = 377  # Fibonacci number: optimal packing (vs 1369 for 37x37 grid)
+    use_tensegrity_loss: bool = False  # Structural integrity regularization
+    tensegrity_weight: float = 0.01  # Weight for tensegrity loss
+
+    # NCA decoder (Experiment 5) - Neural Cellular Automata Gaussians
+    nca_steps: int = 16  # Number of NCA iterations
+    nca_neighbors: int = 6  # Local neighborhood size
+    nca_step_size: float = 0.1  # Initial step size for updates
+
     # VLM semantic guidance
     use_vlm_guidance: bool = False  # Use VLM density maps for loss weighting
     vlm_weight: float = 0.5  # How much to weight by VLM density (0=uniform, 1=full VLM weighting)
@@ -128,9 +146,17 @@ class TrainingConfig:
     boundary_weight: float = 0.1  # Extra loss weight at zone boundaries (Fresnel fringes)
     use_edge_aware: bool = False  # Smaller Gaussians at depth edges (diffraction)
     use_phase_blending: bool = False  # Interference-like alpha compositing
+    use_phase_output: bool = False  # Output per-channel RGB phases from decoder (for QSR)
     edge_scale_factor: float = 0.5  # How much to shrink scales at edges (0-1)
     edge_opacity_boost: float = 0.2  # Opacity boost at edges (0-1)
     phase_amplitude: float = 0.25  # Phase interference amplitude (0-1)
+
+    # Multi-pose training: Fix dark novel views via view-dependent opacity
+    multi_pose_augmentation: bool = False  # Enable random pose augmentation
+    pose_range_elevation: Tuple[float, float] = (-30, 45)  # Degrees
+    pose_range_azimuth: Tuple[float, float] = (0, 360)  # Degrees
+    frontal_prob: float = 0.3  # Prob of using frontal (reconstruction loss) vs novel (consistency)
+    use_pose_encoding: bool = False  # Enable pose encoding in decoder
 
     # Device
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -501,7 +527,7 @@ class ImageDataset(Dataset):
     Dataset for training Gaussian decoders.
 
     Loads images and their precomputed:
-    - Depth maps (from TinyDepthNet or Depth Anything)
+    - Depth maps (from Depth Anything V2)
     - DINOv2 features
     - SAAG Gaussians (for Experiment 1)
     - VLM density maps (optional, for semantic-aware loss weighting)
@@ -514,13 +540,20 @@ class ImageDataset(Dataset):
         feature_cache_dir: Optional[str] = None,
         use_augmentation: bool = True,
         max_images: int = None,
-        load_vlm_density: bool = False
+        load_vlm_density: bool = False,
+        feature_dim: int = 384
     ):
         self.data_dir = Path(data_dir)
         self.image_size = image_size
         self.feature_cache_dir = Path(feature_cache_dir) if feature_cache_dir else self.data_dir / "features"
         self.use_augmentation = use_augmentation
         self.load_vlm_density = load_vlm_density
+        self.feature_dim = feature_dim
+
+        # Feature file suffix based on model size (small uses default, others have size suffix)
+        feature_dim_to_size = {384: 'small', 768: 'base', 1024: 'large'}
+        model_size = feature_dim_to_size.get(feature_dim, 'small')
+        self.feature_suffix = f"_dinov2_{model_size}.bin" if model_size != 'small' else "_dinov2.bin"
 
         # Data augmentation transforms
         if use_augmentation:
@@ -567,19 +600,19 @@ class ImageDataset(Dataset):
         img_tensor = img_tensor.permute(2, 0, 1)  # (3, H, W)
 
         # Load precomputed features (if available)
-        feature_path = self.feature_cache_dir / f"{name}_dinov2.bin"
+        feature_path = self.feature_cache_dir / f"{name}{self.feature_suffix}"
         depth_path = self.feature_cache_dir / f"{name}_depth.bin"
         saag_path = self.feature_cache_dir / f"{name}_saag.bin"
         vlm_density_path = self.feature_cache_dir / f"{name}_vlm_density.npy"
 
-        # Features: (384, 37, 37)
+        # Features: (feature_dim, 37, 37)
         if feature_path.exists():
             features = np.fromfile(feature_path, dtype=np.float32)
-            features = features.reshape(37, 37, 384).transpose(2, 0, 1)
+            features = features.reshape(37, 37, self.feature_dim).transpose(2, 0, 1)
             features = torch.from_numpy(features.copy())
         else:
             # Placeholder - will be computed on-the-fly in training loop
-            features = torch.zeros(384, 37, 37)
+            features = torch.zeros(self.feature_dim, 37, 37)
 
         # Depth: (1, H, W) - preprocessed at 256x256, resize to target size
         if depth_path.exists():
@@ -646,6 +679,82 @@ class ImageDataset(Dataset):
             'has_vlm_density': has_vlm_density,
             'name': name
         }
+
+
+def create_camera_from_pose(
+    elevation_rad: float,
+    azimuth_rad: float,
+    render_size: int,
+    focal_length_mult: float = 0.8,
+    distance: float = 2.0
+) -> Camera:
+    """
+    Create a camera at the specified elevation and azimuth angles.
+
+    Used for multi-pose training to render from different viewpoints.
+
+    Args:
+        elevation_rad: Elevation angle in radians (vertical angle from horizon)
+        azimuth_rad: Azimuth angle in radians (horizontal angle, 0 = front)
+        render_size: Size of rendered image
+        focal_length_mult: Multiplier for focal length (relative to render_size)
+        distance: Distance from camera to origin
+
+    Returns:
+        Camera positioned at the specified angles, looking at origin
+    """
+    # Camera position in world coordinates (spherical to Cartesian)
+    cam_x = distance * np.cos(elevation_rad) * np.sin(azimuth_rad)
+    cam_y = distance * np.sin(elevation_rad)
+    cam_z = distance * np.cos(elevation_rad) * np.cos(azimuth_rad)
+
+    # Build view matrix (camera looking at origin)
+    # Forward = normalize(origin - cam_pos)
+    forward = np.array([-cam_x, -cam_y, -cam_z])
+    forward_norm = np.linalg.norm(forward)
+    if forward_norm < 1e-6:
+        forward = np.array([0.0, 0.0, -1.0])  # Default to looking down -Z
+    else:
+        forward = forward / forward_norm
+
+    # Up vector (world Y)
+    up = np.array([0.0, 1.0, 0.0])
+
+    # Right = forward × up
+    right = np.cross(forward, up)
+    right_norm = np.linalg.norm(right)
+    if right_norm < 1e-6:
+        # Handle looking straight up/down
+        right = np.array([1.0, 0.0, 0.0])
+    else:
+        right = right / right_norm
+
+    # Recalculate up to be orthogonal
+    up = np.cross(right, forward)
+
+    # Build rotation matrix (camera basis in world)
+    R = np.array([right, up, -forward])  # -forward because OpenGL convention
+
+    # Translation (camera position to origin transformation)
+    t = -R @ np.array([cam_x, cam_y, cam_z])
+
+    # Build view matrix (4x4)
+    view_matrix = torch.eye(4)
+    view_matrix[:3, :3] = torch.from_numpy(R).float()
+    view_matrix[:3, 3] = torch.from_numpy(t).float()
+
+    # Create camera
+    camera = Camera(
+        fx=render_size * focal_length_mult,
+        fy=render_size * focal_length_mult,
+        cx=render_size / 2,
+        cy=render_size / 2,
+        width=render_size,
+        height=render_size
+    )
+    camera.set_view(view_matrix)
+
+    return camera
 
 
 def create_dummy_saag(batch_size: int, num_gaussians: int, device: torch.device) -> Dict[str, torch.Tensor]:
@@ -739,7 +848,8 @@ def compute_losses(
     hfgs_config: Optional['HFGSConfig'] = None,
     phase_retrieval_loss_fn: Optional[PhaseRetrievalLoss] = None,
     frequency_loss_fn: Optional[FrequencyDomainLoss] = None,
-    learnable_wavelengths: Optional['LearnableWavelengths'] = None
+    learnable_wavelengths: Optional['LearnableWavelengths'] = None,
+    fresnel_zones: Optional[nn.Module] = None
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """
     Compute training losses.
@@ -830,27 +940,17 @@ def compute_losses(
 
     # Fresnel boundary emphasis loss
     # Adds extra weight at depth zone boundaries (like Fresnel diffraction fringes)
-    if config.use_fresnel_zones and config.boundary_weight > 0 and target_depth is not None:
-        try:
-            from utils.fresnel_zones import FresnelZones
-            fresnel = FresnelZones(
-                num_zones=config.num_fresnel_zones,
-                depth_range=(0.0, 1.0),
-                soft_boundaries=True
-            ).to(target_depth.device)
+    if fresnel_zones is not None and config.boundary_weight > 0 and target_depth is not None:
+        # Compute boundary mask from target depth
+        boundary_mask = fresnel_zones.compute_boundary_mask(target_depth)  # (B, H, W)
 
-            # Compute boundary mask from target depth
-            boundary_mask = fresnel.compute_boundary_mask(target_depth)  # (B, H, W)
+        # Compute per-pixel RGB loss at boundaries
+        pixel_loss = torch.abs(rendered - target).mean(dim=1)  # (B, H, W)
 
-            # Compute per-pixel RGB loss at boundaries
-            pixel_loss = torch.abs(rendered - target).mean(dim=1)  # (B, H, W)
-
-            # Extra loss at boundaries (Fresnel fringe emphasis)
-            boundary_loss = (pixel_loss * boundary_mask).mean()
-            loss_dict['boundary'] = boundary_loss.item()
-            total_loss = total_loss + config.boundary_weight * boundary_loss
-        except ImportError:
-            pass  # FresnelZones not available
+        # Extra loss at boundaries (Fresnel fringe emphasis)
+        boundary_loss = (pixel_loss * boundary_mask).mean()
+        loss_dict['boundary'] = boundary_loss.item()
+        total_loss = total_loss + config.boundary_weight * boundary_loss
 
     # Physics-informed wave equation loss (Helmholtz constraint)
     # From PINN research: ∇²U + k²U = 0 for valid wave solutions
@@ -918,13 +1018,14 @@ def train_epoch(
     frequency_loss_fn: Optional[FrequencyDomainLoss] = None,
     learnable_wavelengths: Optional[LearnableWavelengths] = None,
     hfts_config: Optional[HFTSConfig] = None,
-    effective_train_res: int = None
+    effective_train_res: int = None,
+    fresnel_zones: Optional[nn.Module] = None
 ) -> Dict[str, float]:
     """Train for one epoch with HFTS (Hybrid Fast Training System) support."""
     model.train()
     device = config.device
 
-    epoch_losses = {k: 0.0 for k in ['total', 'rgb', 'ssim', 'lpips', 'depth', 'residual', 'boundary', 'phase_retrieval', 'frequency']}
+    epoch_losses = {k: 0.0 for k in ['total', 'rgb', 'ssim', 'lpips', 'depth', 'residual', 'boundary', 'phase_retrieval', 'frequency', 'tensegrity']}
     num_batches = 0
 
     for batch_idx, batch in enumerate(dataloader):
@@ -973,7 +1074,62 @@ def train_epoch(
                 num_gaussians = hfts_config.get_gaussians_per_patch(
                     epoch, config.epochs, config.gaussians_per_patch
                 )
-            output = model(features, depth, num_gaussians=num_gaussians)
+
+            # Multi-pose training: Sample random poses to fix dark novel views
+            elevation, azimuth = None, None
+            elevation_cpu, azimuth_cpu = 0.0, 0.0  # CPU values for camera creation
+            is_frontal_view = True
+            if config.multi_pose_augmentation and config.use_pose_encoding:
+                # Decide if this batch uses frontal or novel view
+                is_frontal_view = np.random.random() < config.frontal_prob
+                if is_frontal_view:
+                    # Frontal view: elevation=0, azimuth=0
+                    elevation_cpu, azimuth_cpu = 0.0, 0.0
+                    elevation = torch.zeros(B, device=device)
+                    azimuth = torch.zeros(B, device=device)
+                else:
+                    # Novel view: random elevation and azimuth (generate on CPU first)
+                    el_min, el_max = config.pose_range_elevation
+                    az_min, az_max = config.pose_range_azimuth
+                    elevation_cpu = np.random.uniform(np.radians(el_min), np.radians(el_max))
+                    azimuth_cpu = np.random.uniform(np.radians(az_min), np.radians(az_max))
+                    # Create GPU tensors from CPU values (no sync needed)
+                    elevation = torch.full((B,), elevation_cpu, device=device)
+                    azimuth = torch.full((B,), azimuth_cpu, device=device)
+
+            output = model(features, depth, num_gaussians=num_gaussians,
+                          elevation=elevation, azimuth=azimuth)
+            residuals = None
+
+        elif config.experiment == 4:
+            # Experiment 4: Fibonacci Patch Decoder (nature-inspired spiral sampling)
+            # Similar forward pass to Experiment 2, but uses spiral instead of grid
+
+            # Multi-pose training: Sample random poses to fix dark novel views
+            elevation, azimuth = None, None
+            elevation_cpu, azimuth_cpu = 0.0, 0.0
+            is_frontal_view = True
+            if config.multi_pose_augmentation and config.use_pose_encoding:
+                is_frontal_view = np.random.random() < config.frontal_prob
+                if is_frontal_view:
+                    elevation_cpu, azimuth_cpu = 0.0, 0.0
+                    elevation = torch.zeros(B, device=device)
+                    azimuth = torch.zeros(B, device=device)
+                else:
+                    el_min, el_max = config.pose_range_elevation
+                    az_min, az_max = config.pose_range_azimuth
+                    elevation_cpu = np.random.uniform(np.radians(el_min), np.radians(el_max))
+                    azimuth_cpu = np.random.uniform(np.radians(az_min), np.radians(az_max))
+                    elevation = torch.full((B,), elevation_cpu, device=device)
+                    azimuth = torch.full((B,), azimuth_cpu, device=device)
+
+            output = model(features, depth, elevation=elevation, azimuth=azimuth)
+            residuals = None
+
+        elif config.experiment == 5:
+            # Experiment 5: NCA Gaussian Decoder (Neural Cellular Automata)
+            # Similar forward pass to Experiments 2 and 4, but with NCA dynamics
+            output = model(features, depth)
             residuals = None
 
         else:  # config.experiment == 3
@@ -1037,6 +1193,19 @@ def train_epoch(
         # Get phases if model outputs them (Fresnel phase blending)
         phases = output.get('phases', None)
 
+        # Multi-pose training: Create camera from pose angles if augmentation is enabled
+        # This fixes a critical bug where camera was never transformed, only opacity was modified
+        render_camera = camera  # Default to frontal camera
+        if config.multi_pose_augmentation and elevation is not None and azimuth is not None:
+            # Use CPU values directly (no GPU sync from .item())
+            train_res = effective_train_res if effective_train_res is not None else config.image_size
+            render_camera = create_camera_from_pose(
+                elevation_rad=elevation_cpu,
+                azimuth_rad=azimuth_cpu,
+                render_size=train_res,
+                focal_length_mult=0.8  # Match original camera setup
+            )
+
         for b in range(B):
             # Pass phases to renderer if available
             phase_b = phases[b] if phases is not None else None
@@ -1046,7 +1215,7 @@ def train_epoch(
                 output['rotations'][b],
                 output['colors'][b],
                 output['opacities'][b],
-                camera,
+                render_camera,
                 return_depth=True,
                 phases=phase_b
             )
@@ -1071,8 +1240,16 @@ def train_epoch(
             hfgs_config=hfgs_config,
             phase_retrieval_loss_fn=phase_retrieval_loss_fn,
             frequency_loss_fn=frequency_loss_fn,
-            learnable_wavelengths=learnable_wavelengths
+            learnable_wavelengths=learnable_wavelengths,
+            fresnel_zones=fresnel_zones
         )
+
+        # Tensegrity loss: Encourage structural integrity via golden-ratio spacing
+        # Inspired by tensegrity structures (tension/compression balance)
+        if config.use_tensegrity_loss and config.tensegrity_weight > 0:
+            tens_loss = tensegrity_loss(output['positions'], k_neighbors=6)
+            loss = loss + config.tensegrity_weight * tens_loss
+            loss_dict['tensegrity'] = tens_loss.item()
 
         # Check for NaN/Inf before backward pass
         if torch.isnan(loss) or torch.isinf(loss):
@@ -1221,8 +1398,8 @@ def plot_training_metrics(history: Dict[str, List[float]], output_dir: str, expe
 
 def main():
     parser = argparse.ArgumentParser(description="Train Gaussian Decoder")
-    parser.add_argument('--experiment', type=int, default=3, choices=[1, 2, 3],
-                        help='Which experiment to run (1=SAAG Refinement, 2=Direct, 3=FeatureGuided)')
+    parser.add_argument('--experiment', type=int, default=3, choices=[1, 2, 3, 4, 5],
+                        help='Which experiment to run (1=SAAG Refinement, 2=Direct, 3=FeatureGuided, 4=Fibonacci, 5=NCA)')
     parser.add_argument('--data_dir', type=str, default='images',
                         help='Directory containing training images')
     parser.add_argument('--output_dir', type=str, default='checkpoints',
@@ -1233,12 +1410,34 @@ def main():
                         help='Batch size')
     parser.add_argument('--lr', type=float, default=1e-4,
                         help='Learning rate')
+    parser.add_argument('--lpips_weight', type=float, default=0.1,
+                        help='LPIPS perceptual loss weight (default: 0.1, use 0.5 for sharper output)')
     parser.add_argument('--image_size', type=int, default=256,
                         help='Image size for rendering during training')
+    parser.add_argument('--feature_dim', type=int, default=384, choices=[384, 768, 1024],
+                        help='DINOv2 feature dimension: 384 (small), 768 (base), 1024 (large)')
+    parser.add_argument('--use_depth_fusion', action='store_true',
+                        help='Enable depth fusion: concatenate encoded depth features with DINOv2')
+    parser.add_argument('--depth_feature_dim', type=int, default=64,
+                        help='Dimension of encoded depth features for fusion (default: 64)')
     parser.add_argument('--resume', type=str, default=None,
                         help='Resume from checkpoint')
     parser.add_argument('--gaussians_per_patch', type=int, default=4,
                         help='Gaussians per patch for Experiment 2 (default: 4)')
+    parser.add_argument('--n_spiral_points', type=int, default=377,
+                        help='Fibonacci spiral points for Experiment 4 (default: 377, Fibonacci number)')
+    parser.add_argument('--use_tensegrity_loss', action='store_true',
+                        help='Enable tensegrity structural integrity loss (golden ratio spacing)')
+    parser.add_argument('--tensegrity_weight', type=float, default=0.01,
+                        help='Weight for tensegrity loss (default: 0.01)')
+
+    # NCA decoder (Experiment 5) - Neural Cellular Automata
+    parser.add_argument('--nca_steps', type=int, default=16,
+                        help='Number of NCA iterations for Experiment 5 (default: 16)')
+    parser.add_argument('--nca_neighbors', type=int, default=6,
+                        help='NCA neighborhood size for Experiment 5 (default: 6)')
+    parser.add_argument('--nca_step_size', type=float, default=0.1,
+                        help='Initial NCA step size for Experiment 5 (default: 0.1)')
     parser.add_argument('--max_images', type=int, default=None,
                         help='Maximum number of training images to use (default: all)')
     parser.add_argument('--use_vlm_guidance', action='store_true',
@@ -1257,6 +1456,8 @@ def main():
                         help='Enable edge-aware Gaussian placement (Fresnel diffraction)')
     parser.add_argument('--use_phase_blending', action='store_true',
                         help='Enable phase-based interference blending')
+    parser.add_argument('--use_phase_output', action='store_true',
+                        help='Enable per-channel RGB phase output from decoder (for QSR/wave rendering)')
     parser.add_argument('--edge_scale_factor', type=float, default=0.5,
                         help='Scale reduction at edges (0-1, default: 0.5)')
     parser.add_argument('--edge_opacity_boost', type=float, default=0.2,
@@ -1312,6 +1513,12 @@ def main():
                         help='Blue channel wavelength (default: 0.041 = 450nm equiv)')
 
     # ==========================================================================
+    # QSR: Quantum Scene Representation (per-channel complex wave functions)
+    # ==========================================================================
+    parser.add_argument('--use_qsr', action='store_true',
+                        help='Enable Quantum Scene Representation: per-channel phases + wave rendering + phase retrieval')
+
+    # ==========================================================================
     # HFTS: Hybrid Fast Training System (10× SPEEDUP!)
     # ==========================================================================
     parser.add_argument('--train_resolution', type=int, default=None,
@@ -1323,7 +1530,34 @@ def main():
     parser.add_argument('--fast_mode', action='store_true',
                         help='Enable all HFTS optimizations: 64px training, progressive, stochastic')
 
+    # ==========================================================================
+    # Multi-Pose Training: Fix dark novel views via view-dependent opacity
+    # ==========================================================================
+    parser.add_argument('--multi_pose_augmentation', action='store_true',
+                        help='Enable multi-pose training to fix dark novel views')
+    parser.add_argument('--pose_range_elevation', type=float, nargs=2, default=[-30, 45],
+                        help='Elevation range in degrees (default: -30 45)')
+    parser.add_argument('--pose_range_azimuth', type=float, nargs=2, default=[0, 360],
+                        help='Azimuth range in degrees (default: 0 360)')
+    parser.add_argument('--frontal_prob', type=float, default=0.3,
+                        help='Probability of using frontal view for reconstruction loss (default: 0.3)')
+    parser.add_argument('--use_pose_encoding', action='store_true',
+                        help='Enable pose encoding in decoder (required for multi-pose training)')
+
     args = parser.parse_args()
+
+    # QSR: Enable all related features when --use_qsr is set
+    if args.use_qsr:
+        args.use_phase_output = True      # DirectPatchDecoder outputs per-channel phases
+        args.use_wave_rendering = True    # Use WaveFieldRenderer for complex field accumulation
+        args.use_phase_retrieval_loss = True  # Self-supervised physics loss
+        print("\n=== QSR (Quantum Scene Representation) ENABLED ===")
+        print("  - Per-channel RGB phases (3 phases per Gaussian)")
+        print("  - WaveFieldRenderer with complex wave interference")
+        print("  - Phase retrieval self-supervision loss")
+        if args.learnable_wavelengths:
+            print("  - Learnable per-channel wavelengths (RGB physics)")
+        print("================================================\n")
 
     # Create config
     config = TrainingConfig(
@@ -1333,7 +1567,11 @@ def main():
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
+        lpips_weight=args.lpips_weight,
         image_size=args.image_size,
+        feature_dim=args.feature_dim,
+        use_depth_fusion=args.use_depth_fusion,
+        depth_feature_dim=args.depth_feature_dim,
         gaussians_per_patch=args.gaussians_per_patch,
         max_images=args.max_images,
         use_vlm_guidance=args.use_vlm_guidance,
@@ -1344,9 +1582,24 @@ def main():
         boundary_weight=args.boundary_weight,
         use_edge_aware=args.use_edge_aware,
         use_phase_blending=args.use_phase_blending,
+        use_phase_output=args.use_phase_output,
         edge_scale_factor=args.edge_scale_factor,
         edge_opacity_boost=args.edge_opacity_boost,
-        phase_amplitude=args.phase_amplitude
+        phase_amplitude=args.phase_amplitude,
+        # Multi-pose training
+        multi_pose_augmentation=args.multi_pose_augmentation,
+        pose_range_elevation=tuple(args.pose_range_elevation),
+        pose_range_azimuth=tuple(args.pose_range_azimuth),
+        frontal_prob=args.frontal_prob,
+        use_pose_encoding=args.use_pose_encoding,
+        # Fibonacci decoder (Experiment 4)
+        n_spiral_points=args.n_spiral_points,
+        use_tensegrity_loss=args.use_tensegrity_loss,
+        tensegrity_weight=args.tensegrity_weight,
+        # NCA decoder (Experiment 5)
+        nca_steps=args.nca_steps,
+        nca_neighbors=args.nca_neighbors,
+        nca_step_size=args.nca_step_size,
     )
 
     # Create physics config
@@ -1488,7 +1741,8 @@ def main():
         config.image_size,
         use_augmentation=config.use_augmentation,
         max_images=config.max_images,
-        load_vlm_density=config.use_vlm_guidance
+        load_vlm_density=config.use_vlm_guidance,
+        feature_dim=config.feature_dim
     )
 
     if len(dataset) == 0:
@@ -1501,19 +1755,22 @@ def main():
             img = Image.fromarray(np.random.randint(0, 255, (256, 256, 3), dtype=np.uint8))
             img.save(dummy_dir / f"dummy_{i}.png")
 
-        dataset = ImageDataset(str(dummy_dir), config.image_size)
+        dataset = ImageDataset(str(dummy_dir), config.image_size, feature_dim=config.feature_dim)
 
     dataloader = DataLoader(
         dataset,
         batch_size=config.batch_size,
         shuffle=True,
-        num_workers=0,  # Keep simple for now
+        num_workers=4,
+        persistent_workers=True,
         pin_memory=True if config.device == 'cuda' else False
     )
 
     # Check if physics-derived decoder is required
+    # NOTE: QSR uses wave rendering but with per-channel LEARNED phases (DirectPatchDecoder),
+    # not physics-derived phases (PhysicsDirectPatchDecoder)
     use_physics_decoder = (
-        physics_config.use_wave_rendering or
+        (physics_config.use_wave_rendering and not args.use_qsr) or
         physics_config.use_physics_zones or
         physics_config.use_diffraction_placement
     )
@@ -1544,6 +1801,7 @@ def main():
             # PhysicsDirectPatchDecoder with physics-derived phase
             print("Using PhysicsDirectPatchDecoder (physics-derived phase)")
             model = PhysicsDirectPatchDecoder(
+                feature_dim=config.feature_dim,
                 gaussians_per_patch=config.gaussians_per_patch,
                 wavelength=physics_config.wavelength,
                 learnable_wavelength=physics_config.learnable_wavelength,
@@ -1552,20 +1810,51 @@ def main():
             )
         else:
             # DirectPatchDecoder with optional heuristic Fresnel enhancements
+            # QSR: use_phase_output enables per-channel RGB phases for wave rendering
             model = DirectPatchDecoder(
+                feature_dim=config.feature_dim,
                 gaussians_per_patch=config.gaussians_per_patch,
                 use_fresnel_zones=config.use_fresnel_zones,
                 num_fresnel_zones=config.num_fresnel_zones,
                 use_edge_aware=config.use_edge_aware,
-                use_phase_output=config.use_phase_blending,
+                use_phase_output=config.use_phase_output or config.use_phase_blending,
                 edge_scale_factor=config.edge_scale_factor,
-                edge_opacity_boost=config.edge_opacity_boost
+                edge_opacity_boost=config.edge_opacity_boost,
+                # Multi-pose training: Enable pose encoding for view-dependent opacity
+                use_pose_encoding=config.use_pose_encoding if hasattr(config, 'use_pose_encoding') else False,
+                # Depth fusion: concatenate encoded depth with DINOv2 features
+                use_depth_fusion=config.use_depth_fusion,
+                depth_feature_dim=config.depth_feature_dim,
             )
+    elif config.experiment == 4:
+        # Fibonacci decoder: Nature-inspired golden spiral sampling
+        print(f"Using FibonacciPatchDecoder ({config.n_spiral_points} spiral points)")
+        model = FibonacciPatchDecoder(
+            feature_dim=config.feature_dim,
+            n_spiral_points=config.n_spiral_points,
+            gaussians_per_point=1,  # Spiral already provides good distribution
+            use_fresnel_zones=config.use_fresnel_zones,
+            num_fresnel_zones=config.num_fresnel_zones,
+            use_phase_output=config.use_phase_output or config.use_phase_blending,
+            use_pose_encoding=config.use_pose_encoding if hasattr(config, 'use_pose_encoding') else False,
+        )
+    elif config.experiment == 5:
+        # NCA decoder: Neural Cellular Automata Gaussians (Exp 014)
+        print(f"Using NCAGaussianDecoder ({config.n_spiral_points} points, {config.nca_steps} NCA steps)")
+        model = NCAGaussianDecoder(
+            feature_dim=config.feature_dim,
+            n_points=config.n_spiral_points,  # Reuse Fibonacci spiral points
+            n_steps=config.nca_steps,
+            k_neighbors=config.nca_neighbors,
+        )
     else:  # 3
         model = FeatureGuidedSAAG()
 
     model = model.to(config.device)
     print(f"\nModel parameters: {count_parameters(model):,}")
+    print(f"Feature dimension: {config.feature_dim} (DINOv2-{'small' if config.feature_dim == 384 else 'base' if config.feature_dim == 768 else 'large'})")
+    if config.use_depth_fusion:
+        print(f"Depth fusion: ENABLED ({config.depth_feature_dim}-dim depth features)")
 
     # Create renderer at effective_train_res (HFTS: Multi-Resolution Training)
     # This is the key speedup: train at 64×64 instead of 256×256 = 16× fewer pixels!
@@ -1584,6 +1873,20 @@ def main():
             effective_train_res,
             use_phase_blending=True,  # Enable phase blending for HFGS mode
             phase_amplitude=0.3
+        )
+    elif config.experiment == 4 and config.use_phase_blending:
+        # Fibonacci decoder: Use FourierGaussianRenderer (fully vectorized)
+        # WaveFieldRenderer crashes due to per-Gaussian Python for-loop causing
+        # memory fragmentation (~380K small tensor allocations per epoch).
+        # FourierGaussianRenderer uses batched FFT operations - no memory leaks.
+        print("Using FourierGaussianRenderer for Fibonacci (vectorized, no memory fragmentation)")
+        renderer = FourierGaussianRenderer(
+            effective_train_res,
+            effective_train_res,
+            wavelength_r=0.65,  # Red wavelength
+            wavelength_g=0.55,  # Green wavelength
+            wavelength_b=0.45,  # Blue wavelength
+            learnable_wavelengths=True,
         )
     elif physics_config.use_wave_rendering:
         # WaveFieldRenderer for true complex wave field accumulation
@@ -1643,6 +1946,20 @@ def main():
             cutoff=hfgs_config.frequency_cutoff,
             high_weight=hfgs_config.high_freq_weight
         ).to(config.device)
+
+    # Initialize FresnelZones once (avoid per-batch creation)
+    fresnel_zones = None
+    if config.use_fresnel_zones and config.boundary_weight > 0:
+        try:
+            from utils.fresnel_zones import FresnelZones
+            fresnel_zones = FresnelZones(
+                num_zones=config.num_fresnel_zones,
+                depth_range=(0.0, 1.0),
+                soft_boundaries=True
+            ).to(config.device)
+            print(f"Initialized FresnelZones with {config.num_fresnel_zones} zones")
+        except ImportError:
+            print("FresnelZones not available")
 
     # Create optimizer - include learnable wavelengths if HFGS enabled
     params_to_optimize = list(model.parameters())
@@ -1705,7 +2022,8 @@ def main():
             frequency_loss_fn=frequency_loss_fn,
             learnable_wavelengths=learnable_wavelengths,
             hfts_config=hfts_config,
-            effective_train_res=effective_train_res
+            effective_train_res=effective_train_res,
+            fresnel_zones=fresnel_zones
         )
 
         # Step scheduler
@@ -1785,6 +2103,23 @@ def main():
                     'depth': {0: 'batch'}
                 },
                 opset_version=14
+            )
+        elif config.experiment in [4, 5]:
+            # Experiments 4 (Fibonacci) and 5 (NCA) - similar export as experiment 2
+            dummy_features = torch.randn(1, 384, 37, 37, device=config.device)
+            dummy_depth = torch.rand(1, 1, 518, 518, device=config.device)
+
+            torch.onnx.export(
+                model,
+                (dummy_features, dummy_depth),
+                str(export_path),
+                input_names=['features', 'depth'],
+                output_names=['positions', 'scales', 'rotations', 'colors', 'opacities'],
+                dynamic_axes={
+                    'features': {0: 'batch'},
+                    'depth': {0: 'batch'}
+                },
+                opset_version=16  # grid_sample requires opset 16+
             )
         else:  # 3
             dummy_features = torch.randn(1, 384, 37, 37, device=config.device)

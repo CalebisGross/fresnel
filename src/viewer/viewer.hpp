@@ -68,6 +68,12 @@ public:
     bool load_image(const std::string& path);
 
     /**
+     * Load a pre-computed Gaussian file (.bin or .ply)
+     * Supports Fresnel binary format and standard 3DGS PLY format
+     */
+    bool load_gaussian_file(const std::string& path);
+
+    /**
      * Reprocess the currently loaded image with current quality settings
      * @param preview If true, use faster preview settings
      */
@@ -199,6 +205,7 @@ private:
     // Image path input buffer for UI
     char image_path_buffer_[512] = "";
     char export_path_buffer_[512] = "output.ppm";
+    char ply_export_path_[512] = "output.ply";
 
     // Internal helper for smart subsample calculation
     int calculate_auto_subsample() const;

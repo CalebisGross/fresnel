@@ -870,8 +870,15 @@ class WaveFieldRenderer(nn.Module):
             amplitude = gauss_val * opacity  # (h, w)
 
             # Complex contribution: A × exp(iφ) = A×cos(φ) + i×A×sin(φ)
-            cos_phase = torch.cos(phase)
-            sin_phase = torch.sin(phase)
+            # QSR: Support per-channel phases (3,) or scalar phase for backwards compatibility
+            if phase.dim() == 0 or (phase.dim() == 1 and phase.shape[0] == 1):
+                # Scalar phase - apply same phase to all channels
+                cos_phase = torch.cos(phase)
+                sin_phase = torch.sin(phase)
+            else:
+                # Per-channel phases (3,) - one phase per RGB channel
+                cos_phase = torch.cos(phase)  # (3,)
+                sin_phase = torch.sin(phase)  # (3,)
 
             # Accumulate complex field (color modulates amplitude)
             # wave_real += A × color × cos(φ)
@@ -1622,8 +1629,8 @@ class FourierGaussianRenderer(nn.Module):
         U2_V2 = self.U2_V2.to(device)
         background = self.background.to(device)
 
-        # Get constrained wavelengths
-        wavelengths = self._get_constrained_wavelengths()
+        # Get constrained wavelengths (ensure on correct device)
+        wavelengths = self._get_constrained_wavelengths().to(device)
 
         # Compute 2D covariance and projections
         cov_2d, means_2d, depths = compute_2d_covariance(
@@ -1676,93 +1683,68 @@ class FourierGaussianRenderer(nn.Module):
         else:
             phases_computed = phases
 
-        # Normalize scale for frequency domain
-        # In freq domain, Gaussian with spatial σ has freq σ_f = 1/(2π×σ)
-        # We work in cycles/pixel, so scale accordingly
-        σ_freq = σ_2d / (2 * torch.pi * W)  # Normalize by image width
+        # FFT of Gaussian: spatial σ → frequency amplitude and decay
+        # F(exp(-x²/(2σ²))) = σ√(2π) × exp(-2π²σ²k²)
+        # Amplitude is proportional to σ_spatial, decay uses σ_spatial² in exponent
+        # Note: σ_2d is in pixels, U2_V2 is in cycles/pixel², so units work out
+        σ_spatial = σ_2d  # Keep spatial sigma for amplitude and decay
 
-        # Initialize complex frequency field for RGB
-        freq_field = torch.zeros(3, H, W, dtype=torch.cfloat, device=device)
-
-        # Compute per-channel phases from depth (different λ per channel)
-        # phase_c = (2π / λ_c) × path_diff
-        path_diff = torch.abs(depths - self.focal_depth)
-        phases_rgb = (2 * torch.pi / wavelengths.view(3, 1)) * path_diff.unsqueeze(0)
-        # Shape: (3, N_visible)
+        # Use REAL spatial accumulation for proper Gaussian rendering
+        # FFT with complex phases causes destructive interference
+        # Instead: render each Gaussian as a spatial blob and accumulate
+        image = torch.zeros(3, H, W, device=device)
 
         # BATCHED PROCESSING to prevent OOM
-        # Instead of creating (N, H, W) tensors for ALL Gaussians at once,
-        # process in batches and accumulate into freq_field incrementally.
-        # This keeps memory bounded to O(batch_size × H × W) instead of O(N × H × W)
-        batch_size = 16  # Small batch to fit in VRAM alongside training
+        batch_size = 16
 
         for batch_start in range(0, N_visible, batch_size):
             batch_end = min(batch_start + batch_size, N_visible)
-            B = batch_end - batch_start  # Actual batch size
+            B = batch_end - batch_start
 
             # Get batch slices
-            σ_batch = σ_freq[batch_start:batch_end]
-            x_batch = x_norm[batch_start:batch_end]
-            y_batch = y_norm[batch_start:batch_end]
+            σ_batch = σ_spatial[batch_start:batch_end]
+            mean_x_batch = means_2d[batch_start:batch_end, 0]
+            mean_y_batch = means_2d[batch_start:batch_end, 1]
             opacity_batch = opacities[batch_start:batch_end]
             color_batch = colors[batch_start:batch_end]
-            phases_batch = phases_rgb[:, batch_start:batch_end]  # (3, B)
+
+            # Create pixel coordinate grids
+            y_coords = torch.arange(H, device=device, dtype=torch.float32)
+            x_coords = torch.arange(W, device=device, dtype=torch.float32)
+            Y, X = torch.meshgrid(y_coords, x_coords, indexing='ij')  # (H, W)
 
             # Expand for broadcasting: (B, H, W)
             σ_exp = σ_batch.view(B, 1, 1)
-            x_exp = x_batch.view(B, 1, 1)
-            y_exp = y_batch.view(B, 1, 1)
+            mx_exp = mean_x_batch.view(B, 1, 1)
+            my_exp = mean_y_batch.view(B, 1, 1)
 
-            # Gaussian amplitude in frequency domain: (B, H, W)
-            gaussian_freq = σ_exp * torch.exp(-2 * torch.pi**2 * σ_exp**2 * U2_V2)
-
-            # Translation phase shift: exp(-2πi(u×x + v×y))
-            translation_phase = torch.exp(-2j * torch.pi * (U * x_exp + V * y_exp))
-
-            # Combine Gaussian shape with translation
-            base_contribution = gaussian_freq * translation_phase  # (B, H, W) complex
-            del gaussian_freq, translation_phase  # Free memory
+            # Compute Gaussian values for each position
+            # G(x,y) = exp(-((x-mx)² + (y-my)²) / (2σ²))
+            dx = X.unsqueeze(0) - mx_exp  # (B, H, W)
+            dy = Y.unsqueeze(0) - my_exp  # (B, H, W)
+            dist_sq = dx**2 + dy**2
+            gaussian_vals = torch.exp(-dist_sq / (2 * σ_exp**2 + 1e-8))  # (B, H, W)
 
             # Apply opacity
             opacity_exp = opacity_batch.view(B, 1, 1)
-            base_contribution = base_contribution * opacity_exp
+            gaussian_vals = gaussian_vals * opacity_exp
 
-            # For each color channel, apply wave phase and accumulate
+            # For each color channel, accumulate
             for c in range(3):
-                # Wave phase for this channel: (B, 1, 1)
-                wave_phase = torch.exp(1j * phases_batch[c].view(B, 1, 1))
-
-                # Color amplitude for this channel: (B, 1, 1)
                 color_amp = color_batch[:, c].view(B, 1, 1)
+                channel_contrib = color_amp * gaussian_vals
+                image[c] = image[c] + channel_contrib.sum(dim=0)
 
-                # Channel contribution: (B, H, W) complex
-                channel_contrib = color_amp * base_contribution * wave_phase
+            del gaussian_vals, dx, dy, dist_sq
 
-                # Accumulate into freq_field (sum over batch)
-                freq_field[c] = freq_field[c] + channel_contrib.sum(dim=0)
-                del channel_contrib  # Free memory immediately
-
-            del base_contribution  # Free memory
-
-        # Single inverse FFT to get spatial field
-        spatial_field = torch.fft.ifft2(freq_field)  # (3, H, W) complex
-
-        # Convert to intensity: I = |U|² = real² + imag²
-        intensity = spatial_field.real**2 + spatial_field.imag**2  # (3, H, W)
-
-        # Normalize - constructive interference can exceed 1.0
-        max_val = intensity.max()
+        # Normalize to [0, 1] range
+        max_val = image.max()
         if max_val > 1e-8:
-            intensity = intensity / max_val
+            image = image / max_val
 
-        # Apply sqrt to convert intensity to amplitude-like values for display
-        # (optional - depends on desired look)
-        # image = torch.sqrt(intensity + 1e-8)
-        image = intensity  # Keep as intensity for now
-
-        # Add background where intensity is low
-        total_intensity = intensity.sum(dim=0, keepdim=True)  # (1, H, W)
-        bg_weight = torch.clamp(1.0 - total_intensity, 0, 1)
+        # Add background where image is low
+        total_value = image.sum(dim=0, keepdim=True)  # (1, H, W)
+        bg_weight = torch.clamp(1.0 - total_value, 0, 1)
         image = image + background.view(3, 1, 1) * bg_weight
 
         # Clamp final output

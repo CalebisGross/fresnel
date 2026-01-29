@@ -50,8 +50,24 @@ except ImportError:
 import onnxruntime as ort
 
 # Model paths
-DINOV2_MODEL = PROJECT_ROOT / "models" / "dinov2_small.onnx"
 DEPTH_MODEL = PROJECT_ROOT / "models" / "depth_anything_v2_small.onnx"
+
+# DINOv2 model configurations
+DINOV2_CONFIGS = {
+    'small': {'path': 'dinov2_small.onnx', 'feature_dim': 384},
+    'base': {'path': 'dinov2_base.onnx', 'feature_dim': 768},
+    'large': {'path': 'dinov2_large.onnx', 'feature_dim': 1024},
+}
+
+def get_dinov2_model_path(model_size: str = 'small') -> Path:
+    """Get the DINOv2 ONNX model path for the specified size."""
+    if model_size not in DINOV2_CONFIGS:
+        raise ValueError(f"Unknown DINOv2 size: {model_size}. Choose from: {list(DINOV2_CONFIGS.keys())}")
+    return PROJECT_ROOT / "models" / DINOV2_CONFIGS[model_size]['path']
+
+def get_dinov2_feature_dim(model_size: str = 'small') -> int:
+    """Get the feature dimension for the specified DINOv2 model size."""
+    return DINOV2_CONFIGS[model_size]['feature_dim']
 
 # DINOv2 constants
 DINOV2_INPUT_SIZE = 518
@@ -250,17 +266,22 @@ def preprocess_dataset(
     remove_bg: bool = False,
     use_vlm: bool = False,
     vlm_url: str = "http://localhost:1234/v1/chat/completions",
-    vlm_grid_size: int = 8
+    vlm_grid_size: int = 8,
+    dinov2_size: str = 'small'
 ):
     """Preprocess all images in data_dir."""
     data_dir = Path(data_dir)
     output_dir = Path(output_dir) if output_dir else data_dir / "features"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Get DINOv2 model path for selected size
+    dinov2_model = get_dinov2_model_path(dinov2_size)
+    feature_dim = get_dinov2_feature_dim(dinov2_size)
+
     # Check models exist
-    if not DINOV2_MODEL.exists():
-        print(f"Error: DINOv2 model not found at {DINOV2_MODEL}")
-        print("Run: python scripts/export_dinov2_model.py")
+    if not dinov2_model.exists():
+        print(f"Error: DINOv2 model not found at {dinov2_model}")
+        print(f"Run: python scripts/export/export_dinov2_model.py --size {dinov2_size}")
         sys.exit(1)
 
     if not DEPTH_MODEL.exists():
@@ -294,6 +315,7 @@ def preprocess_dataset(
 
     print(f"Found {len(images)} images in {data_dir}")
     print(f"Output directory: {output_dir}")
+    print(f"DINOv2 model: {dinov2_size} ({feature_dim}-dim features)")
     if remove_bg:
         print("Background removal: ENABLED")
     if use_vlm:
@@ -301,8 +323,8 @@ def preprocess_dataset(
     print()
 
     # Load models
-    print("Loading DINOv2 model...")
-    dinov2_session = ort.InferenceSession(str(DINOV2_MODEL), providers=['CPUExecutionProvider'])
+    print(f"Loading DINOv2-{dinov2_size} model...")
+    dinov2_session = ort.InferenceSession(str(dinov2_model), providers=['CPUExecutionProvider'])
 
     print("Loading Depth Anything V2 model...")
     depth_session = ort.InferenceSession(str(DEPTH_MODEL), providers=['CPUExecutionProvider'])
@@ -333,10 +355,13 @@ def preprocess_dataset(
     processed = 0
     vlm_extracted = 0
 
+    # Feature file suffix includes model size for differentiation
+    feature_suffix = f"_dinov2_{dinov2_size}.bin" if dinov2_size != 'small' else "_dinov2.bin"
+
     for img_path in tqdm(images, desc="Preprocessing"):
         name = img_path.stem
 
-        feature_path = output_dir / f"{name}_dinov2.bin"
+        feature_path = output_dir / f"{name}{feature_suffix}"
         depth_path = output_dir / f"{name}_depth.bin"
         vlm_density_path = output_dir / f"{name}_vlm_density.npy"
 
@@ -443,6 +468,8 @@ def main():
                         help='LM Studio API URL (default: http://localhost:1234/v1/chat/completions)')
     parser.add_argument('--vlm_grid_size', type=int, default=8, choices=[4, 8, 16],
                         help='VLM density grid size (default: 8)')
+    parser.add_argument('--dinov2_size', type=str, default='small', choices=['small', 'base', 'large'],
+                        help='DINOv2 model size: small (384-dim), base (768-dim), large (1024-dim)')
 
     args = parser.parse_args()
 
@@ -458,7 +485,8 @@ def main():
         args.remove_background,
         args.use_vlm,
         args.vlm_url,
-        args.vlm_grid_size
+        args.vlm_grid_size,
+        args.dinov2_size
     )
 
 

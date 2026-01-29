@@ -6,7 +6,10 @@ Extracts patch tokens (spatial feature grid) from an image using DINOv2.
 Output is a 2D grid of feature vectors that preserve spatial information.
 
 Usage:
-    python dinov2_inference.py input.jpg output.bin
+    python dinov2_inference.py input.jpg output.bin [model_size]
+
+    model_size: small (384-dim), base (768-dim), or large (1024-dim)
+                Default: small
 
 Output format:
     - Binary file containing raw float32 patch tokens
@@ -21,10 +24,22 @@ import numpy as np
 import onnxruntime as ort
 from PIL import Image
 
-# Model path (relative to script directory)
+# Model paths (relative to script directory)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.join(SCRIPT_DIR, "..", "..")
-MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "dinov2_small.onnx")
+
+# Model size configurations
+MODEL_CONFIGS = {
+    'small': {'path': 'dinov2_small.onnx', 'feature_dim': 384},
+    'base': {'path': 'dinov2_base.onnx', 'feature_dim': 768},
+    'large': {'path': 'dinov2_large.onnx', 'feature_dim': 1024},
+}
+
+def get_model_path(model_size: str = 'small') -> str:
+    """Get the ONNX model path for the specified size."""
+    if model_size not in MODEL_CONFIGS:
+        raise ValueError(f"Unknown model size: {model_size}. Choose from: {list(MODEL_CONFIGS.keys())}")
+    return os.path.join(PROJECT_ROOT, "models", MODEL_CONFIGS[model_size]['path'])
 
 # DINOv2 uses ImageNet normalization
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
@@ -61,24 +76,26 @@ def preprocess_image(image_path: str) -> np.ndarray:
     return img_array
 
 
-def run_inference(input_path: str, output_path: str):
+def run_inference(input_path: str, output_path: str, model_size: str = 'small'):
     """
     Run DINOv2 feature extraction and save result.
 
     Args:
         input_path: Path to input image
         output_path: Path to output binary file
+        model_size: Model size ('small', 'base', or 'large')
     """
-    if not os.path.exists(MODEL_PATH):
-        print(f"Error: Model not found at {MODEL_PATH}", file=sys.stderr)
-        print("Run scripts/export_dinov2_model.py first to download and convert the model.", file=sys.stderr)
+    model_path = get_model_path(model_size)
+    if not os.path.exists(model_path):
+        print(f"Error: Model not found at {model_path}", file=sys.stderr)
+        print(f"Run: python scripts/export/export_dinov2_model.py --size {model_size}", file=sys.stderr)
         sys.exit(1)
 
     # Load and preprocess
     img_input = preprocess_image(input_path)
 
     # Create ONNX Runtime session
-    session = ort.InferenceSession(MODEL_PATH, providers=['CPUExecutionProvider'])
+    session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'])
 
     # Run inference
     outputs = session.run(None, {'pixel_values': img_input})
@@ -106,13 +123,15 @@ def run_inference(input_path: str, output_path: str):
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: dinov2_inference.py <input_image> <output_bin>", file=sys.stderr)
+        print("Usage: dinov2_inference.py <input_image> <output_bin> [model_size]", file=sys.stderr)
+        print("  model_size: small (default), base, or large", file=sys.stderr)
         sys.exit(1)
 
     input_path = sys.argv[1]
     output_path = sys.argv[2]
+    model_size = sys.argv[3] if len(sys.argv) > 3 else 'small'
 
-    run_inference(input_path, output_path)
+    run_inference(input_path, output_path, model_size)
 
 
 if __name__ == "__main__":

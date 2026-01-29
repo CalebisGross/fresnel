@@ -145,6 +145,32 @@ public:
      */
     bool load_binary(const std::string& path);
 
+    /**
+     * Load Gaussians from PLY file (standard 3D Gaussian Splatting format).
+     *
+     * Reverses the transformations from save_ply:
+     * - Scale: exp(log_scale)
+     * - Color: f_dc * C0 + 0.5
+     * - Opacity: sigmoid(opacity_raw)
+     *
+     * @param path Input file path (.ply)
+     * @return true if successful
+     */
+    bool load_ply(const std::string& path);
+
+    /**
+     * Save Gaussians to PLY file (standard 3D Gaussian Splatting format).
+     *
+     * Compatible with viewers like:
+     * - Blender (with Gaussian Splatting addon)
+     * - SuperSplat, Luma AI viewers
+     * - MeshLab (as point cloud)
+     *
+     * @param path Output file path (.ply)
+     * @return true if successful
+     */
+    bool save_ply(const std::string& path) const;
+
 private:
     std::vector<Gaussian3D> gaussians_;
 };

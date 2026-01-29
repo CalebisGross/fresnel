@@ -14,9 +14,9 @@ namespace fresnel {
 static std::string find_project_root() {
     std::filesystem::path current = std::filesystem::current_path();
 
-    // Walk up looking for scripts/decoder_inference.py
+    // Walk up looking for .venv directory
     for (int i = 0; i < 10; i++) {
-        if (std::filesystem::exists(current / "scripts" / "decoder_inference.py")) {
+        if (std::filesystem::exists(current / ".venv")) {
             return current.string();
         }
         if (current.has_parent_path() && current != current.parent_path()) {
@@ -35,7 +35,7 @@ LearnedGaussianDecoder::LearnedGaussianDecoder() {
     std::string root = find_project_root();
     if (!root.empty()) {
         python_path_ = root + "/.venv/bin/python";
-        script_path_ = root + "/scripts/decoder_inference.py";
+        script_path_ = root + "/scripts/inference/decoder_inference.py";
     }
     model_available_ = check_model_available();
 }
@@ -60,7 +60,7 @@ bool LearnedGaussianDecoder::check_model_available() {
 
     // Check if ONNX model exists
     std::string root = find_project_root();
-    std::string model_path = root + "/checkpoints/overnight_run/exp2/gaussian_decoder_exp2.onnx";
+    std::string model_path = root + "/models/gaussian_decoder.onnx";
     if (!std::filesystem::exists(model_path)) {
         std::cerr << "[Decoder] ONNX model not found at: " << model_path << "\n";
         return false;

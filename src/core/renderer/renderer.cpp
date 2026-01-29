@@ -5,6 +5,7 @@
 #include <random>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 
 namespace fresnel {
 
@@ -450,11 +451,17 @@ void GaussianRenderer::cpu_sort_fallback() {
 }
 
 void GaussianRenderer::rasterize() {
+    // Apply max_render_gaussians limit if set
+    size_t render_count = num_gaussians_;
+    if (settings_.max_render_gaussians > 0 && settings_.max_render_gaussians < num_gaussians_) {
+        render_count = settings_.max_render_gaussians;
+    }
+
     // Render parameters
     std::vector<float> render_params = {
         static_cast<float>(settings_.width),
         static_cast<float>(settings_.height),
-        static_cast<float>(num_gaussians_),
+        static_cast<float>(render_count),
         settings_.background_color.r,
         settings_.background_color.g,
         settings_.background_color.b
@@ -637,6 +644,152 @@ bool GaussianCloud::load_binary(const std::string& path) {
     }
 
     return file.good();
+}
+
+bool GaussianCloud::save_ply(const std::string& path) const {
+    std::ofstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+
+    // Write PLY header (ASCII)
+    file << "ply\n";
+    file << "format binary_little_endian 1.0\n";
+    file << "element vertex " << gaussians_.size() << "\n";
+    file << "property float x\n";
+    file << "property float y\n";
+    file << "property float z\n";
+    file << "property float scale_0\n";
+    file << "property float scale_1\n";
+    file << "property float scale_2\n";
+    file << "property float rot_0\n";
+    file << "property float rot_1\n";
+    file << "property float rot_2\n";
+    file << "property float rot_3\n";
+    file << "property float f_dc_0\n";
+    file << "property float f_dc_1\n";
+    file << "property float f_dc_2\n";
+    file << "property float opacity\n";
+    file << "end_header\n";
+
+    // Write binary data for each Gaussian
+    for (const auto& g : gaussians_) {
+        // Position (x, y, z)
+        file.write(reinterpret_cast<const char*>(&g.position.x), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.position.y), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.position.z), sizeof(float));
+
+        // Scale (log-space for compatibility with standard viewers)
+        float log_scale_x = std::log(std::max(g.scale.x, 1e-7f));
+        float log_scale_y = std::log(std::max(g.scale.y, 1e-7f));
+        float log_scale_z = std::log(std::max(g.scale.z, 1e-7f));
+        file.write(reinterpret_cast<const char*>(&log_scale_x), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&log_scale_y), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&log_scale_z), sizeof(float));
+
+        // Rotation (quaternion w, x, y, z)
+        file.write(reinterpret_cast<const char*>(&g.rotation.w), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.rotation.x), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.rotation.y), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&g.rotation.z), sizeof(float));
+
+        // Color (as DC spherical harmonic coefficient, which is color * C0)
+        // C0 = 0.28209479177387814 (SH basis for constant term)
+        constexpr float C0 = 0.28209479177387814f;
+        float f_dc_0 = (g.color.r - 0.5f) / C0;
+        float f_dc_1 = (g.color.g - 0.5f) / C0;
+        float f_dc_2 = (g.color.b - 0.5f) / C0;
+        file.write(reinterpret_cast<const char*>(&f_dc_0), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&f_dc_1), sizeof(float));
+        file.write(reinterpret_cast<const char*>(&f_dc_2), sizeof(float));
+
+        // Opacity (inverse sigmoid for compatibility)
+        float opacity_raw = std::log(g.opacity / std::max(1.0f - g.opacity, 1e-7f));
+        file.write(reinterpret_cast<const char*>(&opacity_raw), sizeof(float));
+    }
+
+    return file.good();
+}
+
+bool GaussianCloud::load_ply(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        return false;
+    }
+
+    // Parse PLY header (ASCII)
+    std::string line;
+    size_t num_vertices = 0;
+    bool header_done = false;
+
+    while (std::getline(file, line)) {
+        // Remove carriage return if present
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+
+        if (line.find("element vertex") != std::string::npos) {
+            // Parse: "element vertex 12345"
+            std::istringstream iss(line);
+            std::string elem, vert;
+            iss >> elem >> vert >> num_vertices;
+        } else if (line == "end_header") {
+            header_done = true;
+            break;
+        }
+    }
+
+    if (!header_done || num_vertices == 0) {
+        std::cerr << "Invalid PLY header or no vertices\n";
+        return false;
+    }
+
+    gaussians_.clear();
+    gaussians_.reserve(num_vertices);
+
+    // SH basis constant for DC term
+    constexpr float C0 = 0.28209479177387814f;
+
+    // Read binary data
+    for (size_t i = 0; i < num_vertices; i++) {
+        Gaussian3D g;
+        float vals[14];
+
+        file.read(reinterpret_cast<char*>(vals), 14 * sizeof(float));
+        if (!file.good()) {
+            std::cerr << "Failed reading Gaussian " << i << "\n";
+            return false;
+        }
+
+        // Position (x, y, z)
+        g.position.x = vals[0];
+        g.position.y = vals[1];
+        g.position.z = vals[2];
+
+        // Scale (exp of log-space values)
+        g.scale.x = std::exp(vals[3]);
+        g.scale.y = std::exp(vals[4]);
+        g.scale.z = std::exp(vals[5]);
+
+        // Rotation (quaternion w, x, y, z)
+        g.rotation.w = vals[6];
+        g.rotation.x = vals[7];
+        g.rotation.y = vals[8];
+        g.rotation.z = vals[9];
+
+        // Color (from DC spherical harmonic: color = f_dc * C0 + 0.5)
+        g.color.r = std::clamp(vals[10] * C0 + 0.5f, 0.0f, 1.0f);
+        g.color.g = std::clamp(vals[11] * C0 + 0.5f, 0.0f, 1.0f);
+        g.color.b = std::clamp(vals[12] * C0 + 0.5f, 0.0f, 1.0f);
+
+        // Opacity (sigmoid of raw value)
+        g.opacity = 1.0f / (1.0f + std::exp(-vals[13]));
+
+        gaussians_.push_back(g);
+    }
+
+    std::cout << "Loaded " << gaussians_.size() << " Gaussians from PLY\n";
+    return true;
 }
 
 } // namespace fresnel

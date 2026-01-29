@@ -21,6 +21,7 @@ struct RenderSettings {
     float opacity_threshold = 1.0f / 255.0f;  // Minimum opacity to render
     bool sort_enabled = true;       // Enable depth sorting
     glm::vec3 background_color = glm::vec3(0.0f);
+    uint32_t max_render_gaussians = 0;  // 0 = no limit, otherwise cap per-frame rendering
 };
 
 /**
@@ -91,6 +92,12 @@ public:
      */
     const RenderSettings& settings() const { return settings_; }
 
+    /**
+     * Set max Gaussians to render per frame (0 = no limit)
+     * Use lower values during camera interaction for smooth preview
+     */
+    void set_max_render_gaussians(uint32_t max) { settings_.max_render_gaussians = max; }
+
 private:
     void compile_shaders();
     void create_buffers();
@@ -124,7 +131,7 @@ private:
     // GPU radix sort (replaces CPU sorting for large Gaussian counts)
     std::unique_ptr<GPURadixSort> gpu_sort_;
     static constexpr size_t GPU_SORT_THRESHOLD = 1000;  // Use GPU sort above this count
-    static constexpr size_t GPU_SORT_MAX_ELEMENTS = 200000;  // Max supported Gaussians
+    static constexpr size_t GPU_SORT_MAX_ELEMENTS = 5000000;  // Max supported Gaussians (5M uses ~320MB)
 
     void cpu_sort_fallback();  // CPU sorting for small counts or fallback
 };
