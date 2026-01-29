@@ -6,6 +6,9 @@
 
 set -e
 
+FRESNEL_DIR="${FRESNEL_DIR:-/home/user/fresnel}"
+VENV_DIR="$FRESNEL_DIR/.venv"
+
 echo "========================================"
 echo "Fresnel Cloud Setup"
 echo "AMD Developer Cloud - MI300X (192GB)"
@@ -22,8 +25,43 @@ else
     echo "WARNING: rocm-smi not found. GPU detection may fail."
 fi
 
+# Create and activate virtual environment
+echo "Setting up Python virtual environment..."
+if [ ! -d "$VENV_DIR" ]; then
+    echo "Creating venv at $VENV_DIR..."
+    python3 -m venv "$VENV_DIR" || {
+        echo "ERROR: Failed to create virtual environment"
+        echo "Installing python3-venv..."
+        apt update && apt install -y python3.12-venv
+        echo "Retrying venv creation..."
+        python3 -m venv "$VENV_DIR" || {
+            echo "ERROR: Still failed to create venv. Exiting."
+            exit 1
+        }
+    }
+fi
+
+# Verify venv was created
+if [ ! -f "$VENV_DIR/bin/activate" ]; then
+    echo "ERROR: Virtual environment activation script not found"
+    exit 1
+fi
+
+source "$VENV_DIR/bin/activate"
+echo "Activated: $VENV_DIR"
+echo ""
+
+# Check if PyTorch is installed with GPU support
+echo "Checking PyTorch installation..."
+if ! python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+    echo "PyTorch not found or GPU not available. Installing PyTorch with ROCm..."
+    # Use nightly with ROCm 6.2 for best MI300X compatibility
+    pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/rocm6.2
+    echo ""
+fi
+
 # Verify PyTorch sees the GPU
-echo "Checking PyTorch GPU access..."
+echo "Verifying PyTorch GPU access..."
 python3 -c "
 import torch
 print(f'PyTorch version: {torch.__version__}')
@@ -51,11 +89,11 @@ echo ""
 # Install Python dependencies
 echo "Installing Python dependencies..."
 if [ -f "$FRESNEL_DIR/cloud/requirements.txt" ]; then
-    pip install -q -r "$FRESNEL_DIR/cloud/requirements.txt"
-    echo "Dependencies installed."
+    pip install -r "$FRESNEL_DIR/cloud/requirements.txt"
+    echo "Dependencies installed from requirements.txt"
 else
-    echo "WARNING: requirements.txt not found at $FRESNEL_DIR/cloud/requirements.txt"
-    echo "You may need to install dependencies manually."
+    echo "requirements.txt not found, installing essential dependencies..."
+    pip install numpy pillow scipy tqdm matplotlib lpips onnx onnxruntime
 fi
 echo ""
 

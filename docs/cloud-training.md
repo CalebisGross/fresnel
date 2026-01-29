@@ -41,11 +41,30 @@ bash cloud/download_results.sh root@your-instance-ip
 
 1. Click "Create" → "GPU Droplet"
 2. Select **MI300X** (1x GPU, 192GB VRAM)
-3. Choose a region close to you
-4. Add your SSH key
-5. Click "Create Droplet"
+3. **Choose a base image** (see below)
+4. Choose a region close to you
+5. Add your SSH key
+6. Click "Create Droplet"
 
 **Cost**: $1.99/hour for 1x MI300X
+
+### Choosing a Base Image
+
+When creating your instance, you'll see several image options:
+
+| Image | PyTorch | ROCm | Recommendation |
+|-------|---------|------|----------------|
+| ROCm 7.1 Software | None | 7.1 | Requires manual PyTorch install |
+| PyTorch 2.6.0 - ROCm 7.0 | 2.6.0 | 7.0 | **Recommended** - Ready to use |
+| PyTorch 2.5.x - ROCm 6.x | 2.5.x | 6.x | Works, slightly older |
+
+**Recommended**: PyTorch 2.6.0 - ROCm 7.0
+
+- Pre-installed PyTorch with GPU support
+- Skip manual installation (~10 min saved)
+- Known working configuration
+
+If you use the ROCm 7.1 base image, `setup.sh` will automatically install PyTorch with ROCm 6.2 nightly (which is compatible with ROCm 7.1).
 
 ### SSH Access
 
@@ -95,10 +114,30 @@ MI300X has 192GB VRAM (12x your local 16GB), enabling much larger batch sizes:
 
 | Setting | Local (RX 7800 XT) | Cloud (MI300X) |
 |---------|-------------------|----------------|
-| Batch size | 2-4 | 32-64 |
+| Batch size | 2-4 | 64-256 |
 | Image size | 128-256 | 256-512 |
 | HSA_OVERRIDE | Required (11.0.0) | Not needed |
 | Training time | 8-12 hrs | 2-6 hrs |
+
+### Optimizing for MI300X
+
+With 192GB VRAM, the default batch sizes may only use 3-5% of available memory. You can significantly increase batch sizes:
+
+| Mode | Default Batch | VRAM Usage |
+|------|---------------|------------|
+| validate | 32 | ~2% |
+| fast | 256 | ~15% |
+| standard | 128 | ~10% |
+| full | 64 | ~20% |
+
+To use even larger batches:
+
+```bash
+# Custom batch size of 512
+bash cloud/train.sh custom 100 512 256
+```
+
+**Note**: Larger batches train faster but may affect convergence. Start with the defaults and experiment.
 
 ## Step-by-Step Workflow
 
@@ -227,6 +266,75 @@ Session: 2.5h elapsed, ~$4.98 spent
 3. **Use fast mode** - 10x faster with similar quality
 4. **Set auto-shutdown** - Never leave instances running
 5. **Download results** - Don't re-run successful training
+
+## What to Expect
+
+### First Epoch is Slow
+
+The first training epoch takes significantly longer than subsequent epochs:
+
+- JIT compilation of GPU kernels
+- Cache warming
+- Data loader initialization
+
+**Example timing (fast mode, 500 images):**
+
+- Epoch 1: 15-30 minutes
+- Epoch 2+: 1-2 minutes each
+
+Don't panic if you don't see output for 15-30 minutes after starting training.
+
+### Output May Be Delayed
+
+Python buffers output by default. If you don't see progress:
+
+1. Check GPU is working: `rocm-smi` (should show ~99% usage)
+2. Check process is running: `ps aux | grep train_gaussian`
+3. Wait for first epoch to complete
+
+The `train.sh` script now uses unbuffered output (`stdbuf -oL`), but if running manually:
+
+```bash
+PYTHONUNBUFFERED=1 python -u scripts/training/train_gaussian_decoder.py ...
+```
+
+## Debugging Training
+
+### Is Training Actually Running?
+
+```bash
+# Check GPU utilization (should be ~99%)
+rocm-smi
+
+# Check process exists and CPU usage
+ps aux | grep train_gaussian
+
+# Check what the process is doing (advanced)
+strace -p <PID> -f 2>&1 | head -50
+```
+
+**Good signs (training is working):**
+
+- GPU at 99% utilization
+- Process using 100%+ CPU
+- strace shows `AMDKFD_IOC_WAIT_EVENTS` (waiting for GPU compute)
+- strace shows `futex` calls (threads synchronizing)
+
+**Bad signs (something is wrong):**
+
+- GPU at 0%
+- No Python process found
+- strace shows only `poll` or `select` (stuck waiting for I/O)
+
+### Checking the Log File
+
+```bash
+# See what's in the log
+cat /home/user/fresnel/logs/train_*.log
+
+# Watch for new output
+tail -f /home/user/fresnel/logs/train_*.log
+```
 
 ## Troubleshooting
 

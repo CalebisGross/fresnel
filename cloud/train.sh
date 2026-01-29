@@ -14,6 +14,14 @@ set -e
 FRESNEL_DIR="${FRESNEL_DIR:-/home/user/fresnel}"
 cd "$FRESNEL_DIR"
 
+# Activate venv if it exists
+if [ -d "$FRESNEL_DIR/.venv" ]; then
+    source "$FRESNEL_DIR/.venv/bin/activate"
+fi
+
+# Force unbuffered output for real-time progress
+export PYTHONUNBUFFERED=1
+
 # Parse arguments
 MODE="${1:-fast}"
 CUSTOM_EPOCHS="${2:-100}"
@@ -79,8 +87,9 @@ case $MODE in
         ;;
     "fast")
         # HFTS fast mode - quick experiments
+        # Batch 256 utilizes more of MI300X's 192GB VRAM
         EPOCHS=100
-        BATCH_SIZE=64
+        BATCH_SIZE=256
         IMAGE_SIZE=256
         MAX_IMAGES=""  # Use all
         EXTRA_ARGS="--fast_mode"
@@ -89,8 +98,9 @@ case $MODE in
         ;;
     "standard")
         # Standard training - good quality
+        # Batch 128 balances quality and VRAM utilization
         EPOCHS=200
-        BATCH_SIZE=32
+        BATCH_SIZE=128
         IMAGE_SIZE=256
         MAX_IMAGES=""
         EXTRA_ARGS=""
@@ -99,8 +109,9 @@ case $MODE in
         ;;
     "full")
         # Maximum quality - final model
+        # Batch 64 at 512px is a good balance for high-res training
         EPOCHS=300
-        BATCH_SIZE=16
+        BATCH_SIZE=64
         IMAGE_SIZE=512
         MAX_IMAGES=""
         EXTRA_ARGS="--gaussians_per_patch 8"
@@ -131,7 +142,7 @@ case $MODE in
 esac
 
 # Build command
-TRAIN_CMD="python scripts/train_gaussian_decoder.py \
+TRAIN_CMD="python scripts/training/train_gaussian_decoder.py \
     --experiment 2 \
     --data_dir $DATA_DIR \
     --output_dir $FRESNEL_DIR/checkpoints \
@@ -182,8 +193,8 @@ echo "Starting Training..."
 echo "========================================"
 echo ""
 
-# Run training with logging
-$TRAIN_CMD 2>&1 | tee "$LOGFILE"
+# Run training with logging (stdbuf forces line-buffered output for real-time progress)
+stdbuf -oL -eL $TRAIN_CMD 2>&1 | tee "$LOGFILE"
 
 # Training complete
 echo ""

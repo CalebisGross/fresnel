@@ -83,7 +83,7 @@ tar -czvf "$ARCHIVE" \
     models/*.onnx \
     models/*.onnx.data \
     models/*_processor/ \
-    scripts/*.py \
+    scripts/ \
     cloud/ \
     CLAUDE.md \
     2>/dev/null
